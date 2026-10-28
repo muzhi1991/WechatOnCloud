@@ -1,0 +1,18 @@
+#!/bin/bash
+set -eu
+# This image is exclusively for managed desktops. Missing credentials fail closed.
+test "${WOC_CUA_ENABLED:-0}" = 1
+test -s /run/secrets/cua-token
+install -d -m 700 -o abc -g abc /run/woc-control
+touch /run/woc-control/http-input.lock
+chown abc:abc /run/woc-control/http-input.lock
+chmod 600 /run/woc-control/http-input.lock
+python3 - <<'PY'
+import hashlib, hmac, pathlib, subprocess, os
+raw=pathlib.Path('/run/secrets/cua-token').read_text().strip().encode()
+for username, purpose, flags in [('woc-control','woc-control-owner-v1',['-o']),('woc-view','woc-control-viewer-v1',['-r']),('woc-human','woc-control-human-v1',['-r'])]:
+    password=hmac.new(raw,purpose.encode(),hashlib.sha256).hexdigest()
+    subprocess.run(['kasmvncpasswd','-u',username,*flags,'/run/woc-control/kasm.passwd'],input=f'{password}\n{password}\n'.encode(),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+os.chmod('/run/woc-control/kasm.passwd',0o600)
+PY
+chown abc:abc /run/woc-control/kasm.passwd

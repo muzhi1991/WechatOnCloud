@@ -1,3 +1,14 @@
+export interface ControlStatus {
+  free: boolean; mine: boolean; holder: string | null; managed?: boolean;
+  state?: 'idle' | 'human' | 'agent' | 'handover' | 'faulted'; epoch?: string; pending?: boolean;
+}
+// Generated per page load (including two tabs sharing the same login cookie).
+const clientBytes = crypto.getRandomValues(new Uint8Array(16));
+const clientHex = Array.from(clientBytes, b => b.toString(16).padStart(2, '0')).join('');
+export const controlClientId = [clientHex.slice(0,8),clientHex.slice(8,12),clientHex.slice(12,16),clientHex.slice(16,20),clientHex.slice(20)].join('-');
+const controlEpochs = new Map<string, string>();
+export const controlHeaders = (id: string, epoch?: string) => ({ 'x-woc-client': controlClientId, 'x-woc-epoch': epoch ?? controlEpochs.get(id) ?? '' });
+
 export interface PanelUser {
   id: string;
   username: string;
@@ -47,6 +58,7 @@ export const APP_PROFILES: Record<AppType, AppProfile> = {
 };
 export const appProfile = (t?: AppType): AppProfile => APP_PROFILES[t ?? 'wechat'] ?? APP_PROFILES.wechat;
 export interface PanelInstance {
+  controlManaged?: boolean;
   cuaEnabled?: boolean;
   id: string;
   name: string;
@@ -245,7 +257,8 @@ async function waitVolumeJob(id: string, job: string, onStage?: (stage: string) 
 
 async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   // 仅在有 body 时声明 JSON content-type：否则 Fastify 对「空 body + application/json」会报 400
-  const headers = opts.body ? { 'content-type': 'application/json', ...opts.headers } : opts.headers;
+  const instId = /\/instances\/([a-f0-9]+)(?:\/|$)/.exec(path)?.[1];
+  const headers = { ...(instId ? controlHeaders(instId) : {}), ...(opts.body ? { 'content-type': 'application/json' } : {}), ...opts.headers };
   const res = await apiFetch(path, {
     credentials: 'same-origin',
     ...opts,
@@ -260,6 +273,7 @@ async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
     }
     throw new Error((data as any).error || `请求失败 (${res.status})`);
   }
+  if (instId && data.managed && typeof data.epoch === 'string') controlEpochs.set(instId, data.epoch);
   return data as T;
 }
 
@@ -314,7 +328,7 @@ export const api = {
 
   // 微信实例
   listInstances: () => req<{ instances: InstanceWithStatus[] }>('/api/instances'),
-  cuaConfig: () => req<{ enabled: boolean; namespace?: string }>('/api/admin/cua'),
+  cuaConfig: () => req<{ enabled: boolean; namespace?: string; controlManaged?: boolean }>('/api/admin/cua'),
   createInstance: (name: string, allowedUserIds: string[] = [], reuseVolume?: string, appType: AppType = 'wechat', cuaEnabled = false) =>
     req<{ instance: PanelInstance; started?: boolean }>('/api/admin/instances', {
       method: 'POST',
@@ -388,7 +402,7 @@ export const api = {
   // 本机剪贴板图片 → 容器 X 剪贴板 → Ctrl+V（issue #91）。调用方先用 fitPasteImage 把图压到 1MB 以内（#165）。
   // 每条失败路径都要落到一个能看懂、能照着做的错误上，且有超时：此前反代回 413 时只报「粘贴图片失败」，
   // 网络卡住时请求可以一直挂着。
-  pasteImage: async (id: string, file: Blob) => {
+  pasteImage: async (id: string, file: Blob, epoch?: string) => {
     const ctl = new AbortController();
     const ms = pasteImageTimeoutMs(file.size);
     const timer = setTimeout(() => ctl.abort(), ms);
@@ -397,7 +411,7 @@ export const api = {
       res = await apiFetch(`/api/instances/${id}/paste-image?type=${encodeURIComponent(file.type)}`, {
         method: 'POST',
         credentials: 'same-origin',
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', ...controlHeaders(id, epoch) },
         body: file,
         signal: ctl.signal,
       });
@@ -452,13 +466,15 @@ export const api = {
   },
 
   // 多端协作：操作控制权
-  controlStatus: (id: string) => req<{ free: boolean; mine: boolean; holder: string | null }>(`/api/instances/${id}/control`),
-  controlBeat: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/beat`, { method: 'POST' }),
-  controlTake: (id: string) => req<{ mine: boolean; holder: string }>(`/api/instances/${id}/control/take`, { method: 'POST' }),
-  typeInInstance: (id: string, text: string) => req(`/api/instances/${id}/type`, { method: 'POST', body: JSON.stringify({ text }) }),
+  controlStatus: (id: string) => req<ControlStatus>(`/api/instances/${id}/control`),
+  controlBeat: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/beat`, { method: 'POST' }),
+  controlTake: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/take`, { method: 'POST' }),
+  controlRelease: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/release`, { method: 'POST' }),
+  controlRecover: (id: string) => req<ControlStatus>(`/api/admin/instances/${id}/control/recover`, { method: 'POST' }),
+  typeInInstance: (id: string, text: string, epoch?: string) => req(`/api/instances/${id}/type`, { method: 'POST', headers: controlHeaders(id, epoch), body: JSON.stringify({ text }) }),
   // 本机剪贴板文字粘进应用（粘贴桥判断本机比容器新时用；贴完留在容器剪贴板）
-  pasteText: (id: string, text: string) => req(`/api/instances/${id}/paste-text`, { method: 'POST', body: JSON.stringify({ text }) }),
-  keyInInstance: (id: string, key: string) => req(`/api/instances/${id}/key`, { method: 'POST', body: JSON.stringify({ key }) }),
+  pasteText: (id: string, text: string, epoch?: string) => req(`/api/instances/${id}/paste-text`, { method: 'POST', headers: controlHeaders(id, epoch), body: JSON.stringify({ text }) }),
+  keyInInstance: (id: string, key: string, epoch?: string) => req(`/api/instances/${id}/key`, { method: 'POST', headers: controlHeaders(id, epoch), body: JSON.stringify({ key }) }),
 
   // 桌面壁纸
   listBackgrounds: (id: string) => req<{ backgrounds: string[] }>(`/api/admin/instances/${id}/backgrounds`),

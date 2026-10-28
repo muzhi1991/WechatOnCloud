@@ -1,0 +1,11 @@
+#!/bin/bash
+set -eu
+if [ "${1:-}" != --locked ]; then
+  exec flock --close -w 25 /run/woc-control/http-input.lock "$0" --locked
+fi
+# Controller restart / uncertain RPC recovery: terminate the old driver before
+# accepting a new lease. Do not restart X, WeChat, or other desktop applications.
+s6-svc -d /run/service/svc-woc-cua
+s6-svwait -d -t 10000 /run/service/svc-woc-cua
+s6-setuidgid abc bash -c 'set -eu; source /run/woc-cua/session.env; python3 /woc/control/reset-input.py'
+s6-svc -u /run/service/svc-woc-cua

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, appProfile, fmtUploadSize, provisionProgressText } from '../api';
+import { api, appProfile, fmtUploadSize, provisionProgressText, controlClientId, type ControlStatus } from '../api';
 import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pasteImage';
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
@@ -8,9 +8,10 @@ import { useInstances } from '../AppShell';
 import { VncAudio } from '../vncAudio';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
-function desktopUrl(id: string) {
+function desktopUrl(id: string, managed = false, epoch = "") {
+  const path = `desktop/${id}/websockify` + (managed ? `?wocClient=${controlClientId}&wocEpoch=${epoch}` : "");
   return (
-    `/desktop/${id}/vnc/index.html?autoconnect=1&path=desktop/${id}/websockify&resize=remote` +
+    `/desktop/${id}/vnc/index.html?autoconnect=1&path=${encodeURIComponent(path)}&resize=remote` +
     '&reconnect=true&reconnect_delay=2000&clipboard_up=true&clipboard_down=true&clipboard_seamless=true'
   );
 }
@@ -27,10 +28,12 @@ function installSeamlessIme(
   instId: string,
   onTyped: (text: string) => void,
   onFail: (err: any) => void,
+  epoch?: string,
 ): () => void {
   type Job = { kind: 'text'; data: string } | { kind: 'key'; data: string };
   const queue: Job[] = [];
   let draining = false;
+  let disposed = false;
   const active = () => draining || queue.length > 0;
   // /type 单次上限 500 字（语音输入、长句提交可能超过），按段入队，免得整段被拒后丢失
   const pushText = (data: string) => {
@@ -40,14 +43,14 @@ function installSeamlessIme(
   const drain = async () => {
     if (draining) return;
     draining = true;
-    while (queue.length) {
+    while (!disposed && queue.length) {
       const job = queue[0];
       try {
         if (job.kind === 'text') {
           onTyped(job.data);
-          await api.typeInInstance(instId, job.data);
+          await api.typeInInstance(instId, job.data, epoch);
         }
-        else await api.keyInInstance(instId, job.data);
+        else await api.keyInInstance(instId, job.data, epoch);
       } catch (e) {
         onFail(e); // 单条失败丢弃、继续后续，避免卡住队列；但要让用户知道刚打的字没发出去
       }
@@ -166,6 +169,7 @@ function installSeamlessIme(
   doc.addEventListener('mousedown', onMouseDown, true);
   win.addEventListener('keydown', onKeyDownCapture, true);
   return () => {
+    disposed = true; queue.length = 0;
     doc.removeEventListener('compositionstart', onCompositionStart, true);
     doc.removeEventListener('compositionend', onCompositionEnd, true);
     doc.removeEventListener('beforeinput', onBeforeInput, true);
@@ -638,7 +642,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const uploadQueue = useRef<File[]>([]);
   const uploadBusy = useRef(false);
   const [starting, setStarting] = useState(false);
-  const [control, setControl] = useState<{ free: boolean; mine: boolean; holder: string | null } | null>(null);
+  const [control, setControl] = useState<ControlStatus | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'bg' | 'font'>('bg');
   const [bgList, setBgList] = useState<string[]>([]);
@@ -816,12 +820,18 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     lastBeat.current = now;
     try {
       const r = await api.controlBeat(id);
-      setControl({ free: false, mine: r.mine, holder: r.holder });
+      setControl({ ...r, free: r.free ?? false });
     } catch {
       /* ignore */
     }
   }, [id]);
-  const readOnly = !!control && !control.free && !control.mine; // 别人在操作：只读
+  const readOnly = inst?.controlManaged ? !control?.mine : !!control && !control.free && !control.mine; // 别人在操作：只读
+
+  useEffect(() => {
+    if (!inst?.controlManaged || !control?.mine) return;
+    const timer = window.setInterval(() => { if (!document.hidden) void beat(); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [inst?.controlManaged, control?.mine, beat]);
 
   // 用户在 VNC 内真实操作（鼠标/键盘/滚轮）时续约控制权（同源 iframe 可监听）。
   // 只读用户的操作已被遮罩拦截/失焦，不会误续约。
@@ -860,7 +870,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   // 本机图片粘贴桥（issue #91）：两种输入模式都生效
   const pastingImage = useRef(false);
   useEffect(() => {
-    if (!showVnc || !frameLoaded || !id) return;
+    if (!showVnc || !frameLoaded || !id || readOnly) return;
     const win = frameRef.current?.contentWindow;
     const doc = frameRef.current?.contentDocument;
     if (!win || !doc) return;
@@ -876,7 +886,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           toast('正在粘贴本机图片…', 'ok');
           await pasteImageWithFallback(
             file,
-            (b) => api.pasteImage(id, b),
+            (b) => api.pasteImage(id, b, control?.epoch),
             async (b) => (await fitPasteImage(b, browserImageCodec)).blob,
             () => toast(`图片较大（${fmtUploadSize(file.size)}），正在压缩后重试…`, 'ok'),
           );
@@ -887,16 +897,16 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         }
       },
       // 粘贴容器剪贴板：失败时静默（与以前按键直通 noVNC 一样，不额外打扰）
-      onPlainPaste: () => void api.keyInInstance(id, 'ctrl+v').catch(() => {}),
+      onPlainPaste: () => void api.keyInInstance(id, 'ctrl+v', control?.epoch).catch(() => {}),
       // 本机剪贴板的文字比容器的新：直接贴本机的
       onLocalText: (text, localIsFresh) => {
         if (!shouldPasteLocal(clip.current, text, localIsFresh, frameRef.current?.contentDocument)) return false;
-        void api.pasteText(id, text).catch((e: any) => toast(e?.message || '粘贴失败', 'error'));
+        void api.pasteText(id, text, control?.epoch).catch((e: any) => toast(e?.message || '粘贴失败', 'error'));
         return true;
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showVnc, frameLoaded, frameGen, id]);
+  }, [showVnc, frameLoaded, frameGen, id, control?.epoch, readOnly]);
 
   // 剪贴板协调（见 installClipboardGuard）：两种输入模式都生效
   useEffect(() => {
@@ -912,7 +922,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
   // 无感模式：往同源 iframe 装「中文转发 + 有序队列」钩子；切回转发/重连/卸载时自动移除。
   useEffect(() => {
-    if (inputMode !== 'seamless' || !showVnc || !frameLoaded || !id) return;
+    if (inputMode !== 'seamless' || !showVnc || !frameLoaded || !id || readOnly) return;
     const win = frameRef.current?.contentWindow;
     const doc = frameRef.current?.contentDocument;
     if (!win || !doc) return;
@@ -929,9 +939,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
         // 别人持有控制权（409）时直接说清楚；其余是网络 / 实例问题
         toast(/正在操作/.test(msg) ? msg : `刚输入的文字没能发送到桌面：${msg || '网络或实例暂时不可用'}，请重试`, 'error');
       },
+      control?.epoch,
     );
     return cleanup;
-  }, [inputMode, showVnc, frameLoaded, frameGen, id]);
+  }, [inputMode, showVnc, frameLoaded, frameGen, id, control?.epoch, readOnly]);
 
   // 音频/麦克风桥接：实例就绪即自动连接 kclient 的音频流（扬声器恒开，无需手动找工具条）；
   // 仅当本实例处于焦点（标签页可见且窗口聚焦）时出声/收音，失焦立即断开，避免多实例多端串音。
@@ -1333,12 +1344,12 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setImeSending(true);
     try {
       noteTyped(clip.current, t);
-      await api.typeInInstance(id, t);
+      await api.typeInInstance(id, t, control?.epoch);
       // 打完补一个回车把消息发出去（issue #81）；可由「自动回车」开关关掉（issue #125），
       // 关掉时只把文字填进应用输入框，发不发由用户自己按。焦点【始终留在本输入条】。
       // 切勿在转发模式把焦点切回虚拟机——那等于开了"无感输入"，用户接着打的拼音会以原始 keysym 直灌微信
       // 输入框（出现 "nniih'h你好啊" 这种串码）。下一条仍在本条用本机输入法安全地打。
-      if (autoEnter) await api.keyInInstance(id, 'Return');
+      if (autoEnter) await api.keyInInstance(id, 'Return', control?.epoch);
       setImeText('');
     } catch (e: any) {
       toast(e?.message || '发送失败：请确认实例已「升级实例」（镜像含 xclip/xdotool）', 'error');
@@ -1385,7 +1396,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const takeControl = async () => {
     try {
       const r = await api.controlTake(id);
-      setControl({ free: false, mine: r.mine, holder: r.holder });
+      setControl({ ...r, free: r.free ?? false });
       lastBeat.current = Date.now();
       focusFrame();
     } catch (e: any) {
@@ -1420,6 +1431,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕
           //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
           <div className="ws-actions">
+            {inst?.controlManaged && control?.mine && <button className="ws-action" onClick={() => void api.controlRelease(id).then(setControl).catch(e => toast(e.message, 'error'))}>交回控制</button>}
             <button
               className="ws-action"
               title="文件传输"
@@ -1571,7 +1583,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           <iframe
             ref={frameRef}
             className="iv-frame"
-            src={desktopUrl(id)}
+            src={desktopUrl(id, inst?.controlManaged, control?.epoch)}
             title={`${appLabel} · 实例桌面`}
             allow="clipboard-read; clipboard-write; microphone; camera; autoplay"
             onLoad={() => {
@@ -1641,14 +1653,15 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             </div>
           )}
 
-          {control && !control.free && !control.mine && (
+          {(inst?.controlManaged ? !control?.mine : control && !control.free && !control.mine) && (
             <div className="iv-lock">
               <div className="iv-lock-card">
-                <div className="iv-lock-title">「{control.holder}」正在操作</div>
+                <div className="iv-lock-title">{control?.state === "handover" ? "正在交接，等待旧操作结束" : control?.state === "faulted" ? "控制状态待恢复" : control?.holder ? `「${control.holder}」正在操作` : "当前为只读，可申请控制"}</div>
                 <div className="iv-lock-sub">为避免多端互相干扰，你当前为只读模式。</div>
-                <button className="btn btn-primary iv-notice-btn" onClick={takeControl}>
+                <button className="btn btn-primary iv-notice-btn" disabled={control?.pending || control?.state === "faulted"} onClick={takeControl}>
                   申请控制
                 </button>
+                {isAdmin && control?.state === 'faulted' && <button className="btn iv-notice-btn" onClick={() => void api.controlRecover(id).then(setControl).catch(e => toast(e.message, 'error'))}>恢复控制服务</button>}
               </div>
             </div>
           )}
@@ -1831,7 +1844,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   }}
                   placeholder={
                     readOnly
-                      ? `「${control?.holder}」正在操作，你当前为只读；要操作请点桌面上的「申请控制」`
+                      ? control?.holder ? `「${control.holder}」正在操作，你当前为只读` : '当前为只读；要操作请点桌面上的「申请控制」'
                       : autoEnter
                         ? '中文输入这里 → 回车直接发送到应用（先点好应用的输入框）。Shift+回车换行。'
                         : '中文输入这里 → 回车只把文字填进应用输入框，不自动发送（发送由你按）。Shift+回车换行。'

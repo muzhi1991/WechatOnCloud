@@ -1980,8 +1980,9 @@ const APP_OPTIONS: { type: AppType; desc: string; ready: boolean }[] = [
 
 function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose: () => void; onDone: () => void }) {
   const [cuaAvailable, setCuaAvailable] = useState(false);
+  const [managedCua, setManagedCua] = useState(false);
   const [cuaEnabled, setCuaEnabled] = useState(false);
-  useEffect(() => { let alive = true; void api.cuaConfig().then(c => { if (alive) setCuaAvailable(c.enabled); }).catch(() => {});
+  useEffect(() => { let alive = true; void api.cuaConfig().then(c => { if (alive) { setCuaAvailable(c.enabled); setManagedCua(!!c.controlManaged); } }).catch(() => {});
     return () => { alive = false; }; }, []);
   const [name, setName] = useState('');
   const [appType, setAppType] = useState<AppType>('wechat');
@@ -2047,7 +2048,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           <input type="checkbox" checked={cuaEnabled} onChange={e => setCuaEnabled(e.target.checked)} />
           接入 Cua（允许 Agent 访问此桌面）
         </label>}
-        {cuaEnabled && <div className="muted small">创建后自动登记到 Master；当前为串行测试阶段，请勿与 Agent 同时操作。</div>}
+        {cuaEnabled && <div className="muted small">{managedCua ? '创建后自动接入 Cua。Agent 操作需申请控制；人工可在桌面随时接管。' : '创建后自动登记到 Master；当前为串行测试阶段，请勿与 Agent 同时操作。'}</div>}
         {appType === 'chromium' && (
           <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
         )}

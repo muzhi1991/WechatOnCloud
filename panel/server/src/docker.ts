@@ -785,9 +785,11 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     if (!cuaRegistry || !cuaConfig) throw new Error('Cua integration is disabled');
     // P2 uses a prebuilt, explicitly pinned derived image. No fallback to upstream/latest.
     const imageInfo = await docker.getImage(image).inspect();
+    if (process.env.WOC_CONTROL_ENABLED === '1' && imageInfo.Config?.Labels?.['io.woc.cua.control'] !== '1') throw new Error('Managed control requires the P3 desktop image');
     if (!imageInfo.Config?.Labels?.['io.woc.cua.version']) throw new Error('Selected image does not include WOC Cua integration');
   } else if (!imageOverride) await ensureImage(inst.id);
   const occupied = inst.cuaEnabled ? new Set((await docker.listContainers({ all: true }))
+    .filter(c => process.env.WOC_CONTROL_ENABLED !== '1' || !c.Names.includes('/' + process.env.WOC_PANEL_CONTAINER))
     .flatMap(c => c.Ports.map(p => p.PublicPort).filter((p): p is number => !!p))) : new Set<number>();
   const cua = inst.cuaEnabled ? cuaRegistry!.containerOptions(cuaRegistry!.prepare(inst, occupied)) : undefined;
   if (info) {
@@ -2184,6 +2186,11 @@ function scheduleClipRestore(inst: Instance): void {
 
 // 通过 xdotool 在实例容器内输入文字（绕过 VNC keysym 限制，解决中文 IME 吞字问题）。
 // 用 base64 传递文本避免 shell 转义问题，xclip 写入剪贴板后 xdotool 模拟 Ctrl+V 粘贴；剪贴板打完归还（见上）。
+const managedInput = (inst: Instance) => process.env.WOC_CONTROL_ENABLED === '1' && !!inst.cuaEnabled;
+async function inputExec(inst: Instance, cmd: string[]) {
+  return execCapture(inst, managedInput(inst) ? ['/woc/control/http-input', ...cmd] : cmd);
+}
+
 export async function typeInInstance(inst: Instance, text: string): Promise<void> {
   const b64 = Buffer.from(text, 'utf8').toString('base64');
   const cmd = [
@@ -2198,9 +2205,10 @@ export async function typeInInstance(inst: Instance, text: string): Promise<void
   await withClipLock(inst.id, async () => {
     cancelClipRestore(inst.id);
     try {
-      await execCapture(inst, ['sh', '-c', cmd]);
+      await inputExec(inst, ['sh', '-c', cmd]);
     } finally {
-      scheduleClipRestore(inst);
+      // A deferred clipboard restore could run under the next owner's lease.
+      if (!managedInput(inst)) scheduleClipRestore(inst);
     }
   });
 }
@@ -2220,7 +2228,7 @@ export async function pasteTextInInstance(inst: Instance, text: string): Promise
       `rm -f /tmp/${name}`,
       xdoKey('ctrl+v'),
     ].join('\n');
-    await execCapture(inst, ['bash', '-c', cmd]);
+    await inputExec(inst, ['bash', '-c', cmd]);
   });
 }
 
@@ -2303,7 +2311,7 @@ export async function pasteImageInInstance(inst: Instance, mime: string, content
       'done',
       xdoKey('ctrl+v'),
     ].join('\n');
-    await execCapture(inst, ['bash', '-c', cmd]);
+    await inputExec(inst, ['bash', '-c', cmd]);
   });
 }
 
@@ -2322,13 +2330,13 @@ export async function keyInInstance(inst: Instance, key: string): Promise<void> 
     xdoKey(key),
   ].join('\n');
   if (!/^ctrl\+v$/i.test(key)) {
-    await execCapture(inst, ['sh', '-c', cmd]);
+    await inputExec(inst, ['sh', '-c', cmd]);
     return;
   }
   // 粘贴：打字借用的剪贴板若还没归还，先归还再按，免得贴出刚打的字
   await withClipLock(inst.id, async () => {
     if (cancelClipRestore(inst.id)) await restoreClipboard(inst);
-    await execCapture(inst, ['sh', '-c', cmd]);
+    await inputExec(inst, ['sh', '-c', cmd]);
   });
 }
 
@@ -2750,3 +2758,8 @@ export function instanceTarget(inst: Instance): string {
 }
 
 export { WECHAT_IMAGE };
+
+export async function controlExec(inst: Instance, hard: boolean): Promise<void> {
+  if (hard) await execCapture(inst, ['/woc/control/fence'], 'root');
+  else await execCapture(inst, ['/woc/control/http-input', 'bash', '-c', 'set -eu; source /run/woc-cua/session.env; python3 /woc/control/reset-input.py']);
+}

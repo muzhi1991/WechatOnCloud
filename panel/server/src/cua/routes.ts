@@ -1,3 +1,4 @@
+import { managed, viewToken } from '../control/runtime.js';
 import { readFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -9,7 +10,7 @@ import { cuaRegistry } from './registry.js';
 export function registerCuaRoutes(app: FastifyInstance, admin: (req: FastifyRequest, reply: FastifyReply) => boolean) {
   app.get('/api/admin/cua', async (req, reply) => {
     if (!admin(req, reply)) return;
-    return { enabled: !!cuaConfig, namespace: cuaConfig?.namespace };
+    return { enabled: !!cuaConfig, namespace: cuaConfig?.namespace, controlManaged: process.env.WOC_CONTROL_ENABLED === '1' };
   });
   // A separate machine identity: cookies/admin sessions never authorize secret export.
   const machine = (req: FastifyRequest, reply: FastifyReply) => {
@@ -37,7 +38,7 @@ export function registerCuaRoutes(app: FastifyInstance, admin: (req: FastifyRequ
       if (!inst?.cuaEnabled) return { ...publicRecord, state: 'orphaned' };
       const { state } = await cuaInstanceStatus(inst);
       try {
-        return { ...publicRecord, state, ...(state === 'ready' ? { token: registry.token(record.id) } : {}) };
+        return { ...publicRecord, state, ...(state === 'ready' ? { token: managed(inst) ? viewToken(record.id) : registry.token(record.id) } : {}) };
       } catch { return { ...publicRecord, state: 'error' }; }
     }));
     if (registry.revision !== revision) return reply.code(409).send({ error: 'Snapshot changed; retry' });

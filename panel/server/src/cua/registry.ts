@@ -104,7 +104,7 @@ export class CuaRegistry {
     return {
       env: ['WOC_CUA_ENABLED=1', 'WOC_RESTORE_MINIMIZED=0'],
       bind: `${join(this.config.hostSecretsDir, record.secretRef)}:/run/secrets/cua-token:ro`,
-      ports: { '3211/tcp': [{ HostIp: this.config.bindIp, HostPort: String(record.hostPort) }] },
+      ports: process.env.WOC_CONTROL_ENABLED === '1' ? {} : { '3211/tcp': [{ HostIp: this.config.bindIp, HostPort: String(record.hostPort) }] },
       labels: { 'io.woc.cua.deployment': this.deploymentId, 'io.woc.cua.instance': record.id,
         'io.woc.cua.generation': String(record.generation) },
     };

@@ -147,3 +147,5 @@ dist
 /artifacts/
 /deploy/cua/secrets/
 /deploy/cua-panel/secrets/
+
+/deploy/cua-control/secrets/

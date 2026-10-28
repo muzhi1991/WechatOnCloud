@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
+import { registerAgentControlRoutes } from './control/routes.js';
+import { managed, ensureControl, leases, requestActor, requestEpoch, humanActor, humanWrite, vncAuthorization, trackControlSocket, startControlGateways } from './control/runtime.js';
 import { cuaConfig, watchdogInterval } from './cua/config.js';
 import { cuaRegistry } from './cua/registry.js';
 import { registerCuaRoutes } from './cua/routes.js';
@@ -241,6 +243,7 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
   return u;
 }
 registerCuaRoutes(app, (req, reply) => !!requireAdmin(req, reply));
+registerAgentControlRoutes(app);
 
 // ---------- 登录 / 会话 ----------
 // 登录限速：NAS 面板常被直接暴露公网，无限速 = 可被无脑爆破。
@@ -510,7 +513,7 @@ app.get('/api/instances', async (req, reply) => {
       ]);
       // 只下发 publicInstance：此前直接展开整条记录，连 kasm 凭据（store 里注明「永不下发前端」）和创建失败的原始报错也带给了浏览器
       const provision = provisionView(inst, runtime, u.role === 'admin');
-      return { ...publicInstance(inst), runtime, wechat: wx, imageVersion, cua, ...(provision ? { provision } : {}) };
+      return { ...publicInstance(inst), controlManaged: managed(inst), runtime, wechat: wx, imageVersion, cua, ...(provision ? { provision } : {}) };
     }),
   );
   return { instances: out };
@@ -1053,6 +1056,12 @@ app.post('/api/instances/:id/control/beat', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id)!;
+  if (managed(inst)) {
+    await ensureControl(inst);
+    const actor = requestActor(u, req), status = leases.status(id, actor);
+    return status.mine ? leases.renew(id, actor, requestEpoch(req)) : status;
+  }
   const now = Date.now();
   const h = controlHolders.get(id);
   if (!h || now - h.at > CONTROL_TTL || h.userId === u.id) {
@@ -1068,6 +1077,8 @@ app.get('/api/instances/:id/control', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id)!;
+  if (managed(inst)) { await ensureControl(inst); return leases.status(id, requestActor(u, req)); }
   const h = controlHolders.get(id);
   if (!h || Date.now() - h.at > CONTROL_TTL) return { free: true, mine: false, holder: null };
   return { free: false, mine: h.userId === u.id, holder: h.username };
@@ -1079,15 +1090,38 @@ app.post('/api/instances/:id/control/take', async (req, reply) => {
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id)!;
+  if (managed(inst)) { await ensureControl(inst); return leases.take(id, requestActor(u, req), true); }
   controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now() });
   return { mine: true, holder: u.username };
+});
+
+app.post('/api/instances/:id/control/release', async (req, reply) => {
+  const u = requireAuth(req, reply); if (!u) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  const inst = findInstance(id)!;
+  if (!managed(inst)) return reply.code(400).send({ error: '未启用受管控制' });
+  await ensureControl(inst);
+  return leases.release(id, requestActor(u, req), requestEpoch(req));
+});
+app.post('/api/admin/instances/:id/control/recover', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!managed(inst)) return reply.code(404).send({ error: '受管桌面不存在' });
+  await ensureControl(inst!);
+  return leases.recover(inst!.id);
 });
 
 // 输入类接口（/type、/key、/paste-text、/paste-image）同样受控制权约束：此前只在前端盖只读遮罩，只读的一方
 // 仍能用底部输入条、功能键、粘贴把字送进去，和正在操作的人打架。别人持有（TTL 内）就拒绝；否则视同一次操作，
 // 认领 / 续约——转发输入条打字不经过桌面画面，此前不续约，连着打一会儿字控制权就被别人拿走了。
 // 这是协作上的防打架，不是用户之间的安全边界（有访问权限的人本就能直接操作桌面）。
-function claimControl(u: User, id: string): string | null {
+function claimControl(u: User, id: string, req: FastifyRequest): string | null {
+  if (managed(findInstance(id))) {
+    try { leases.humanPassword(id, requestActor(u, req), requestEpoch(req)); return null; }
+    catch { return '其他操作者或旧控制租约'; }
+  }
   const now = Date.now();
   const h = controlHolders.get(id);
   if (h && h.userId !== u.id && now - h.at <= CONTROL_TTL) return h.username;
@@ -1104,10 +1138,10 @@ app.post('/api/instances/:id/type', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const { text } = (req.body as any) ?? {};
   if (!text || typeof text !== 'string' || text.length > 500) return reply.code(400).send({ error: '文字为空或过长' });
-  const holder = claimControl(u, id);
+  const holder = claimControl(u, id, req);
   if (holder) return reply.code(409).send(controlBusy(holder));
   try {
-    await typeInInstance(findInstance(id)!, text);
+    await humanWrite(u, req, findInstance(id)!, () => typeInInstance(findInstance(id)!, text));
     return { ok: true };
   } catch (e: any) {
     return reply.code(500).send({ error: e?.message || '输入失败' });
@@ -1124,7 +1158,7 @@ app.post('/api/instances/:id/paste-image', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const inst = findInstance(id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
-  const holder = claimControl(u, id);
+  const holder = claimControl(u, id, req);
   if (holder) return reply.code(409).send(controlBusy(holder));
   const mime = String((req.query as any)?.type || '').toLowerCase();
   // PNG 超过 1MB 会卡死【旧】实例的容器剪贴板（见 docker.ts PASTE_IMAGE_PNG_MAX）。已修复的实例（新镜像）放行原图；
@@ -1135,7 +1169,7 @@ app.post('/api/instances/:id/paste-image', async (req, reply) => {
   try {
     const body = await readBody(req, limit);
     if (!body.length) return reply.code(400).send({ error: '空图片' });
-    await pasteImageInInstance(inst, mime, body, largeOk);
+    await humanWrite(u, req, inst, () => pasteImageInInstance(inst, mime, body, largeOk));
     return { ok: true };
   } catch (e: any) {
     if (isPng && !largeOk && (Number(e?.statusCode) === 413 || e?.message === PASTE_IMAGE_PNG_TOO_BIG)) {
@@ -1156,10 +1190,10 @@ app.post('/api/instances/:id/paste-text', { bodyLimit: 2 * 1024 * 1024 }, async 
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const { text } = (req.body as any) ?? {};
   if (!text || typeof text !== 'string' || text.length > 200_000) return reply.code(400).send({ error: '文字为空或过长' });
-  const holder = claimControl(u, id);
+  const holder = claimControl(u, id, req);
   if (holder) return reply.code(409).send(controlBusy(holder));
   try {
-    await pasteTextInInstance(findInstance(id)!, text);
+    await humanWrite(u, req, findInstance(id)!, () => pasteTextInInstance(findInstance(id)!, text));
     return { ok: true };
   } catch (e: any) {
     return reply.code(500).send({ error: e?.message || '粘贴失败' });
@@ -1173,10 +1207,10 @@ app.post('/api/instances/:id/key', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const { key } = (req.body as any) ?? {};
   if (!key || typeof key !== 'string') return reply.code(400).send({ error: '按键名为空' });
-  const holder = claimControl(u, id);
+  const holder = claimControl(u, id, req);
   if (holder) return reply.code(409).send(controlBusy(holder));
   try {
-    await keyInInstance(findInstance(id)!, key);
+    await humanWrite(u, req, findInstance(id)!, () => keyInInstance(findInstance(id)!, key));
     return { ok: true };
   } catch (e: any) {
     return reply.code(500).send({ error: e?.message || '按键失败' });
@@ -1727,19 +1761,36 @@ function watchUpstream(proxyReq: ClientRequest, instId: string, what: string, do
 
 proxy.on('proxyReq', (proxyReq, req, res) => {
   const auth = (req as any)._wocAuth;
-  if (auth) proxyReq.setHeader('authorization', auth);
+  if (auth) proxyReq.setHeader('Authorization', auth);
   // 只盯 noVNC 页面本身：它出不来 = 实例服务卡住。其余资源 / 音频长轮询不计。
   const instId = (req as any)._wocInstId;
   if (instId && (req.url || '').startsWith('/vnc/index.html')) watchUpstream(proxyReq, instId, '桌面页面', res);
 });
 proxy.on('proxyReqWs', (proxyReq, req, socket) => {
   const auth = (req as any)._wocAuth;
-  if (auth) proxyReq.setHeader('authorization', auth);
+  if (auth) proxyReq.setHeader('Authorization', auth);
+  if ((req as any)._wocControl) {
+    // KasmVNC 1.3.3's HTTP parser also requires canonical WebSocket header
+    // casing. nginx used to normalize these before our direct managed proxy.
+    for (const name of ['Host', 'Upgrade', 'Connection', 'Origin', 'Sec-WebSocket-Key', 'Sec-WebSocket-Version', 'Sec-WebSocket-Protocol', 'Sec-WebSocket-Extensions']) {
+      const value = proxyReq.getHeader(name);
+      if (value !== undefined) proxyReq.setHeader(name, value);
+    }
+  }
   // 上游（实例 nginx → KasmVNC websockify）回 101 = ws 接收器接受了连接，桌面真正连上。
   // 卡死时这条不会出现（接收器停止 accept），即可定位"卡在面板→实例之间还是实例内部"。
   const instId = (req as any)._wocInstId;
   if (instId) {
-    proxyReq.on('upgrade', () => {
+    proxyReq.on('upgrade', (_response, upstreamSocket) => {
+      const managedContext = (req as any)._wocControl;
+      if (managedContext) {
+        trackControlSocket(instId, upstreamSocket);
+        trackControlSocket(instId, req.socket as Socket);
+        if (managedContext.writer) {
+          try { leases.humanPassword(instId, managedContext.actor, managedContext.epoch); }
+          catch { upstreamSocket.destroy(); req.socket.destroy(); return; }
+        }
+      }
       trackActiveVncSocket(instId, req.socket as Socket);
       appendInstanceLog(instId, '[vnc] 上游已接受(101) · 桌面连接建立');
     });
@@ -1830,6 +1881,9 @@ const desktopHandler = (req: FastifyRequest, reply: FastifyReply) => {
     return;
   }
   const inst = findInstance(parsed.id)!;
+  if (managed(inst) && (req.method !== 'GET' || !new URL(parsed.rest, 'http://local').pathname.startsWith('/vnc/'))) {
+    return reply.code(403).send({ error: '受管桌面不允许此直连接口' });
+  }
   reply.hijack();
   req.raw.url = parsed.rest;
   (req.raw as any)._wocAuth = basicAuth(inst);
@@ -1880,6 +1934,12 @@ function wsRejectThrottled(id: string, reason: string): boolean {
 await app.ready();
 
 app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) => {
+  // Authentication/fencing is asynchronous; a browser can disconnect before
+  // http-proxy installs its own socket handlers.
+  socket.on('error', () => socket.destroy());
+  void handleDesktopUpgrade(req, socket, head).catch(() => socket.destroy());
+});
+async function handleDesktopUpgrade(req: IncomingMessage, socket: Socket, head: Buffer) {
   // ⚠️ 这三道闸门此前一律「静默 socket.destroy()」，于是用户侧只看到桌面永远「重连中…」，
   // 而面板/实例日志里一个字都没有 —— issue #124 的诊断包就是这样：iframe 反复加载、
   // 容器里 KasmVNC 连一次 websocket 都没收到，却查不出被谁拦下。故每条拒绝路径都必须留痕。
@@ -1929,8 +1989,20 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
     return;
   }
   const inst = findInstance(parsed.id)!;
+  let target = instanceTarget(inst);
+  if (managed(inst)) {
+    if (new URL(parsed.rest, 'http://local').pathname !== '/websockify') { reject('受管桌面只允许 VNC 连接'); return; }
+    await ensureControl(inst);
+    const query = new URL(parsed.rest, 'http://local').searchParams;
+    const client = query.get('wocClient'), epoch = query.get('wocEpoch') || '';
+    const auth = vncAuthorization(inst, u, client, epoch);
+    let actor; try { actor = humanActor(u, client); } catch { /* missing id stays read-only */ }
+    (req as any)._wocControl = { actor, epoch, writer: actor && leases.status(inst.id, actor).mine && leases.status(inst.id).epoch === epoch };
+    (req as any)._wocManagedAuth = auth;
+    target = `http://${inst.containerName}:6901`;
+  }
   req.url = parsed.rest;
-  (req as any)._wocAuth = basicAuth(inst);
+  (req as any)._wocAuth = (req as any)._wocManagedAuth || basicAuth(inst);
   (req as any)._wocInstId = inst.id;
   // 远程桌面连接日志：记录每次 ws 连接尝试 / 上游接受(在 proxyReqWs 里) / 失败 / 关闭时长。
   // 与实例容器内 KasmVNC 的 "got client connection" 按时间对齐，即可看出卡在哪一段。
@@ -1945,10 +2017,10 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) =>
   }
   const t0 = Date.now();
   socket.on('close', () => appendInstanceLog(inst.id, `[vnc] 连接关闭（持续 ${Math.round((Date.now() - t0) / 1000)}s）`));
-  proxy.ws(req, socket, head, { target: instanceTarget(inst) }, (err: any) => {
+  proxy.ws(req, socket, head, { target }, (err: any) => {
     appendInstanceLog(inst.id, `[vnc] 连接失败：${err?.message || err}`);
   });
-});
+}
 
 // 下面的启动步骤都要连 Docker：socket-proxy 加固部署下代理可能比面板晚几秒就绪，先等它
 await waitForDocker();
@@ -1957,6 +2029,7 @@ await waitForDocker();
 await resolveInstanceImage().catch(() => {});
 // 探测面板网络 + 重启后把已登记实例的容器拉起来
 await ensureNetwork().catch(() => {});
+await startControlGateways();
 for (const pub of listInstances()) {
   const inst = findInstance(pub.id)!;
   if (inst.cuaEnabled && cuaRegistry?.get(inst.id)?.desired === 'stopped') continue;

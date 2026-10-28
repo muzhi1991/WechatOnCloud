@@ -1,0 +1,5 @@
+#!/bin/bash
+set -eu
+# --close keeps daemonized xclip children from inheriting the lock. timeout
+# bounds helpers after a controller disconnect; the fence waits on this lock.
+exec flock --close -w 20 /run/woc-control/http-input.lock timeout -k 1 15 "$@"
