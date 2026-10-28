@@ -49,3 +49,15 @@ node integrations/cua-agent/agent.mjs /path/to/agent.json history INSTANCE_ID
 ```
 
 `done` 表示服务确认完成；`interrupted` 表示控制会话或维护被打断；`uncertain` 表示动作可能已经生效。先查看桌面和实际结果，再决定下一步，不能把后两者当作可直接重试的失败。面板重启、外部容器重启和维护都会使旧租约失效；CLI 不续接或重放旧任务。维护未完成时，需要管理员在网页“运行记录”处理，再重新 `acquire`。
+
+## P5 微信 GUI 调用要点
+
+已登录的 Linux 微信 4.1.13.26 暴露 AT-SPI 会话列表、搜索框、编辑框和本次测试消息节点。先检查当前窗口/会话，再执行输入；控件和截图都必须来自新鲜状态。登录页缺少可用树，不代表登录后同样不可读。
+
+DriverService/CallTool 使用 `argumentsJson`（JSON 字符串）传参。目标格式二选一：优先 `target`，不要同时传平铺的 `scope`、`pid` 或 `window_id`。混用 `scope:"desktop"` 和 `target` 会返回 `invalid_action_target`。以下参数已在 P5 验证，坐标只是示例，实际使用必须取自当前截图：
+
+```json
+{"name":"move_cursor","argumentsJson":"{\"target\":{\"kind\":\"desktop\",\"display_id\":\"primary\"},\"x\":160,\"y\":57}"}
+```
+
+`structuredJson` 需要再次 JSON 解析。RPC 返回成功或运行记录为 `done` 不等于 GUI 操作成功；内部可能是拒绝或 `effect:"unverifiable"`。本次指针操作以 GetCursorPosition 回读确认，点击、搜索与发送以截图和辅助功能树核对。发送不能因 `unverifiable` 自动重试。
