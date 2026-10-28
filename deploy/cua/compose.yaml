@@ -1,0 +1,44 @@
+name: woc-cua-canary
+services:
+  desktop:
+    image: local/woc-cua:1.5.2-cua0.6.0-p1
+    container_name: woc-cua-canary-01
+    hostname: woc-cua-canary-01
+    restart: unless-stopped
+    cpus: 2
+    mem_limit: 4g
+    memswap_limit: 4g
+    shm_size: 1g
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Asia/Shanghai
+      CUSTOM_USER: canary
+      FILE__PASSWORD: /run/secrets/vnc-password
+      WOC_APP_TYPE: wechat
+      WOC_CUA_ENABLED: "1"
+      WOC_RESTORE_MINIMIZED: "0"
+      DISABLE_DRI: "1"
+    ports:
+      - "${BIND_IP:?Set BIND_IP}:13311:3211"
+      - "${BIND_IP:?Set BIND_IP}:36081:3000"
+    volumes:
+      - canary-config:/config
+      - ./secrets/cua-token:/run/secrets/cua-token:ro
+      - ./secrets/vnc-password:/run/secrets/vnc-password:ro
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:3211/health]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 4
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  canary-config:
+    name: woc-cua-canary-01-config

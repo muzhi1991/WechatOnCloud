@@ -1,0 +1,11 @@
+#!/bin/bash
+set -eu
+[ "${WOC_CUA_ENABLED:-0}" = "1" ] || exit 0
+install -d -m 700 -o abc -g abc /run/woc-cua /config/.cua /config/.cua/spacesd
+install -d -m 755 -o abc -g abc /config/workspace /config/Downloads
+# Missing credentials disable Cua only, leaving KasmVNC available.
+if [ ! -s /run/secrets/cua-token ]; then
+    echo '[woc-cua] token missing; Cua disabled'
+    exit 0
+fi
+install -m 400 -o abc -g abc /run/secrets/cua-token /run/woc-cua/token

@@ -1,0 +1,15 @@
+#!/bin/bash
+set -eu
+# Enable the shared accessibility bus before either the primary app or Cua starts.
+# Installing libatspi alone leaves Chromium's AT-SPI bridge disabled.
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled '<true>' >/dev/null
+# Only the desktop user reads this file. Never source user-controlled content as root.
+umask 077
+tmp=$(mktemp /run/woc-cua/session.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+for name in DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR PULSE_SERVER; do
+    if [[ -v $name ]]; then printf 'export %s=%q\n' "$name" "${!name}"; fi
+done > "$tmp"
+mv "$tmp" /run/woc-cua/session.env

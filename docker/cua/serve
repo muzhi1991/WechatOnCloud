@@ -1,0 +1,18 @@
+#!/bin/bash
+set -eu
+export HOME=/config
+export CUA_ENV_TOKEN_FILE=/run/woc-cua/token
+export CUA_ENV_DATA_DIR=/config/.cua/spacesd
+export CUA_ENV_DOWNLOADS_DIR=/config/Downloads
+export CUA_ENV_LISTEN=0.0.0.0:3211 CUA_ENV_QUIC_PORT=0
+# P1 canary: no idle cursor probes and no guest power/lifecycle control.
+export CUA_SPACESD_CURSOR_PROBE=false
+until [ "${WOC_CUA_ENABLED:-0}" = "1" ] && [ -r "$CUA_ENV_TOKEN_FILE" ] && [ -s /run/woc-cua/session.env ]; do
+    sleep 5
+done
+source /run/woc-cua/session.env
+until xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; do sleep 2; done
+cd /config/workspace
+echo "[woc-cua] attaching to desktop ${DISPLAY} as $(id -un)"
+# Docker rotates stdout/stderr. Persistent access logging awaits the P4 retention policy.
+exec /usr/local/bin/cua-spacesd serve --no-access-log

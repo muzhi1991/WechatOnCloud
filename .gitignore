@@ -142,3 +142,7 @@ dist
 /.claude
 .DS_Store
 /scratchpad
+
+# Cua canary build inputs, secrets, and local test captures
+/artifacts/
+/deploy/cua/secrets/

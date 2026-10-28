@@ -30,7 +30,7 @@ fi
 
 # 防“最小化后丢失”：本桌面（openbox）无任务栏，窗口被最小化就无处恢复 → 黑屏。
 # 看守进程：每 2s 把“被最小化（不可见）”的顶层窗口重新激活，相当于禁用最小化。对任意应用通用。
-(
+if [ "${WOC_RESTORE_MINIMIZED:-1}" = "1" ]; then (
     export DISPLAY="${DISPLAY:-:1}"
     while sleep 2; do
         all=$(xdotool search --name '.+' 2>/dev/null) || continue
@@ -40,6 +40,12 @@ fi
         done
     done
 ) &
+fi
+
+# 派生镜像可接入已经建立的桌面会话；普通 WOC 镜像不包含此入口。
+if [ "${WOC_CUA_ENABLED:-0}" = "1" ] && [ -x /woc/cua/publish-session ]; then
+    /woc/cua/publish-session
+fi
 
 # 自定义应用若未配置启动命令，给出提示并退出（避免空等）
 if [ "$APP_TYPE" = "custom" ] && [ -z "${APP_LAUNCH:-}" ]; then

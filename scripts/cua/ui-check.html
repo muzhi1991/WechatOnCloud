@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>WOC + Cua 同桌面验收</title>
+<style>
+  body { margin: 48px; background: #eef3f7; color: #183347; font: 22px sans-serif; }
+  textarea { display: block; width: 85%; height: 150px; font: 24px sans-serif; padding: 12px; }
+  output { display: block; padding-top: 24px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  small { font-size: 16px; }
+</style>
+<h1>WOC + Cua 同桌面验收</h1>
+<p>在此输入中文，核对网页与 Cua 截图。</p>
+<textarea aria-label="验收输入框" placeholder="中文输入与剪贴板测试" autofocus></textarea>
+<output aria-live="polite">等待输入</output>
+<p><small>这是独立测试页面；输入只保存在本页面，不向网络发送。</small></p>
+<script>
+  const field = document.querySelector('textarea');
+  const out = document.querySelector('output');
+  field.addEventListener('input', () => { out.textContent = `收到 ${[...field.value].length} 字符：\n${field.value}`; });
+</script>
+</html>

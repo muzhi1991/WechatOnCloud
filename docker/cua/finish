@@ -1,0 +1,3 @@
+#!/bin/sh
+# s6 restarts only this service; avoid a hot crash loop.
+sleep 5

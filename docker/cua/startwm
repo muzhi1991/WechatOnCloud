@@ -1,0 +1,7 @@
+#!/bin/bash
+set -eu
+if [ "${WOC_CUA_ENABLED:-0}" = "1" ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    # One bus for Openbox, primary app, Agent-launched apps, and spacesd.
+    exec dbus-run-session -- /bin/bash /defaults/woc-startwm.original
+fi
+exec /bin/bash /defaults/woc-startwm.original

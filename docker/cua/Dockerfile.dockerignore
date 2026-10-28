@@ -1,0 +1,7 @@
+**
+!docker/
+!docker/autostart
+!docker/cua/
+!docker/cua/**
+!artifacts/
+!artifacts/cua-spacesd
