@@ -9,6 +9,8 @@ import Docker from 'dockerode';
 import { tarArchive, tarEntry, tarFileStream, tarSingleFile, openTarStream, scanArchive, sniffArchive } from './tar.js';
 import { instanceAppType, getDesktopDark, type Instance } from './store.js';
 import { describeHostCpu, describeHostMemPolicy, summarizeMinidump } from './crash-diag.js';
+import { cuaConfig } from './cua/config.js';
+import { cuaRegistry } from './cua/registry.js';
 
 // 实例镜像引用。版本耦合（架构守则 R1）：面板与实例镜像同一 release 同步出包、按同版本号
 // 互相验证——正式版面板把 :latest 改写为与自身相同的版本 tag（如 1.4.1），保证
@@ -16,6 +18,7 @@ import { describeHostCpu, describeHostMemPolicy, summarizeMinidump } from './cra
 // 用户在 env 显式指定了非 latest tag（自行锁版）则完全尊重；开发版面板（dev-*）保持 latest。
 function resolveWechatImage(): string {
   const raw = process.env.WOC_WECHAT_IMAGE || 'ghcr.io/gloridust/wechat-on-cloud:latest';
+  if (raw.includes('@sha256:') || raw.startsWith('sha256:')) return raw;
   const ver = (process.env.WOC_VERSION || '').trim().replace(/^v/, '');
   if (!/^\d+\.\d+\.\d+$/.test(ver)) return raw; // 开发版/未知版本 → 保持原样
   const noDigest = raw.split('@')[0];
@@ -42,6 +45,7 @@ export async function resolveInstanceImage(): Promise<void> {
   if (imageResolved) return;
   imageResolved = true;
   const preferred = WECHAT_IMAGE;
+  if (preferred.includes('@sha256:') || preferred.startsWith('sha256:') || process.env.WOC_WECHAT_IMAGE) return;
   const tagM = preferred.split('@')[0].match(/:([^/:]+)$/);
   if (!tagM || tagM[1] === 'latest') return; // 已是 latest 或无 tag → 无需兜底
   try {
@@ -158,6 +162,25 @@ const INSTANCE_NETWORK = (process.env.WOC_INSTANCE_NETWORK || '').trim() || 'woc
 let networkName: string | null = null;
 
 export type RuntimeState = 'running' | 'stopped' | 'missing';
+
+export async function cuaInstanceStatus(inst: Instance) {
+  if (!inst.cuaEnabled) return { enabled: false, state: 'disabled' as const };
+  const record = cuaRegistry?.get(inst.id);
+  const base = { enabled: true, name: record?.name, generation: record?.generation, master: cuaRegistry?.ackFor(inst.id) };
+  if (!record || !cuaRegistry || !cuaConfig) return { ...base, state: 'starting' as const };
+  if (record.desired === 'deleted') return { ...base, state: 'offline' as const };
+  try {
+    const info = await docker.getContainer(inst.containerName).inspect();
+    if (!info.State.Running) return { ...base, state: 'offline' as const };
+    const labels = info.Config.Labels || {};
+    if (labels['io.woc.cua.deployment'] !== cuaRegistry.deploymentId ||
+        labels['io.woc.cua.generation'] !== String(record.generation)) return { ...base, state: 'starting' as const };
+    const response = await fetch(`http://${inst.containerName}:3211/health`, { signal: AbortSignal.timeout(1500) });
+    return { ...base, state: response.status === 204 ? 'ready' as const : 'starting' as const };
+  } catch (e: any) {
+    return { ...base, state: e.statusCode === 404 ? 'offline' as const : 'starting' as const };
+  }
+}
 
 // 面板自身容器的完整 ID：docker 把 /etc/hostname、/etc/hosts、/etc/resolv.conf 从
 // <数据目录>/containers/<id>/ 绑定挂进容器，mountinfo 里带着这个 ID，与容器名、hostname 都无关。
@@ -630,6 +653,7 @@ export function describeProvisionError(e: any): { summary: string; advice: strin
 
 // 当前镜像引用对应的 :latest 形式；已是 latest / 无 tag 则返回 null（无可回退）。
 function fallbackLatestRef(): string | null {
+  if (WECHAT_IMAGE.includes('@sha256:') || WECHAT_IMAGE.startsWith('sha256:') || process.env.WOC_WECHAT_IMAGE) return null;
   const noDigest = WECHAT_IMAGE.split('@')[0];
   const m = noDigest.match(/^(.*):([^/:]+)$/);
   if (!m || m[2] === 'latest') return null;
@@ -749,13 +773,23 @@ export function runInstance(inst: Instance, opts?: { keepImage?: boolean }): Pro
 async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): Promise<void> {
   const net = await ensureNetwork();
   const existing = docker.getContainer(inst.containerName);
-  const info: any = await existing.inspect().catch(() => null);
+  const info: any = await existing.inspect().catch((e: any) => { if (e.statusCode === 404) return null; throw e; });
   const imageOverride: string | undefined = opts?.keepImage && info?.Image ? String(info.Image) : undefined;
+  const image = imageOverride || (inst.cuaEnabled ? cuaConfig?.image : WECHAT_IMAGE);
+  if (!image) throw new Error('Cua integration is not configured');
   // 沿用旧镜像重建时无需 ensureImage（镜像 id 一定在本地——容器刚在用它）；
   // 也避免"离线 + 本地无 :latest"时连重启都失败。
   // 必须先确保目标镜像在本地、再删旧容器：此前先删后拉，升级时拉不到新镜像（面板刚更新、本地只有旧版本号的镜像、
   // 网络又不通）就会把旧容器删掉却建不出新的，实例直接没了；现在拉取失败时旧容器原样保留。
-  if (!imageOverride) await ensureImage(inst.id);
+  if (inst.cuaEnabled) {
+    if (!cuaRegistry || !cuaConfig) throw new Error('Cua integration is disabled');
+    // P2 uses a prebuilt, explicitly pinned derived image. No fallback to upstream/latest.
+    const imageInfo = await docker.getImage(image).inspect();
+    if (!imageInfo.Config?.Labels?.['io.woc.cua.version']) throw new Error('Selected image does not include WOC Cua integration');
+  } else if (!imageOverride) await ensureImage(inst.id);
+  const occupied = inst.cuaEnabled ? new Set((await docker.listContainers({ all: true }))
+    .flatMap(c => c.Ports.map(p => p.PublicPort).filter((p): p is number => !!p))) : new Set<number>();
+  const cua = inst.cuaEnabled ? cuaRegistry!.containerOptions(cuaRegistry!.prepare(inst, occupied)) : undefined;
   if (info) {
     try {
       // 删除前先把旧容器最后日志快照进持久日志，否则随容器删除就看不到"上次为何停/崩"。
@@ -765,14 +799,15 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
       /* 已被移走，正常 */
     }
   }
-  await ensureInstanceVolume(inst, imageOverride || WECHAT_IMAGE).catch((e) => {
+  await ensureInstanceVolume(inst, image).catch((e) => {
     throw provisionError('volume', e);
   });
   // 摄像头设备（探测不到则为空数组 → 仅摄像头不可用，音频/麦克风照常）
   const vids = videoDevices();
   const dris = ENABLE_GPU ? driDevices() : [];
   const hostConfig: Docker.HostConfig = {
-    Binds: [`${inst.volumeName}:/config`],
+    Binds: [`${inst.volumeName}:/config`, ...(cua ? [cua.bind] : [])],
+    ...(cua ? { PortBindings: cua.ports, NanoCpus: Math.round(cuaConfig!.cpus * 1e9) } : {}),
     NetworkMode: net || undefined,
     SecurityOpt: ['seccomp=unconfined'],
     ShmSize: SHM_SIZE,
@@ -805,12 +840,13 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
   const mac = realisticMac(inst.id);
   const createOpts: Docker.ContainerCreateOptions = {
     name: inst.containerName,
-    Image: imageOverride || WECHAT_IMAGE,
+    Image: image,
     // 内部 hostname 伪装成"个人电脑"名（不再用 woc-wx-<hex>，那是容器/服务器特征）。
     // 反代靠容器名 name 寻址，与此 hostname 无关。
     Hostname: realisticHostname(inst.id),
-    Env: envList(inst),
-    ExposedPorts: { '3000/tcp': {} },
+    Env: [...envList(inst), ...(cua?.env || ['WOC_CUA_ENABLED=0'])],
+    Labels: cua?.labels,
+    ExposedPorts: { '3000/tcp': {}, ...(cua ? { '3211/tcp': {} } : {}) },
     HostConfig: hostConfig,
   };
   // 自定义网络时，MAC 须写到对应 endpoint 上（新版 docker 弃用顶层 MacAddress）；默认网络则用顶层。
@@ -866,6 +902,12 @@ export async function ensureRunning(inst: Instance): Promise<void> {
 // skipPull：批量升级时由调用方先统一拉取一次，避免 N 个实例拉 N 次（受限网络下每次
 // 都要等到拉取停滞超时，表现为"一键升级卡死"）。
 export async function upgradeInstance(inst: Instance, opts?: { skipPull?: boolean }): Promise<void> {
+  if (inst.cuaEnabled) {
+    const wasStopped = (await instanceRuntime(inst)) === 'stopped';
+    await runInstance(inst); // Only WOC_CUA_IMAGE; never the upstream updater's fallback.
+    if (wasStopped) await stopInstance(inst);
+    return;
+  }
   let pullErr: any = null;
   if (!opts?.skipPull) {
     try {
@@ -931,6 +973,7 @@ export async function upgradeInstance(inst: Instance, opts?: { skipPull?: boolea
 // （用户反馈"历史镜像占用太多"）。这里按"无容器引用 + 非当前版本"精准删除，绝不动正在用/未升级实例的镜像。
 // 环境变量 WOC_KEEP_OLD_IMAGES=1 可关闭（想保留旧镜像便于快速回滚的用户）。
 export async function pruneOldWocImages(): Promise<void> {
+  if (process.env.WOC_DISABLE_IMAGE_PRUNE === '1') return;
   if (process.env.WOC_KEEP_OLD_IMAGES === '1') return;
   try {
     // 1) 要保留的镜像 id 集合：当前实例镜像 + 面板自身镜像 + 所有现存容器（含已停止）在用的镜像。
@@ -978,6 +1021,7 @@ export async function pruneOldWocImages(): Promise<void> {
 // 清理悬空（dangling）镜像：升级后旧实例镜像失去 tag 变成 <none>，长期堆积吃磁盘
 // （每层 1-2GB，多次升级后可观）。只删无 tag 且无容器引用的镜像，安全。best-effort。
 export async function pruneDanglingImages(): Promise<void> {
+  if (process.env.WOC_DISABLE_IMAGE_PRUNE === '1') return;
   try {
     const res: any = await docker.pruneImages({ filters: { dangling: ['true'] } as any });
     const freed = Number(res?.SpaceReclaimed || 0);
@@ -1009,21 +1053,27 @@ export async function regenInstanceMachineId(inst: Instance): Promise<void> {
 
 // 停止实例容器（保留容器与数据卷，可再启动）。
 export async function stopInstance(inst: Instance): Promise<void> {
+  if (inst.cuaEnabled) cuaRegistry?.stopped(inst.id, true);
   try {
     await docker.getContainer(inst.containerName).stop({ t: 5 } as any);
     appendInstanceLog(inst.id, '容器已停止');
-  } catch {
-    /* 已停止或不存在 */
+  } catch (e: any) {
+    // Opted-in lifecycle errors must not be reported as a successful stop.
+    if (inst.cuaEnabled && e.statusCode !== 304 && e.statusCode !== 404) throw e;
   }
 }
 
 export async function removeInstance(inst: Instance, purgeVolume: boolean): Promise<void> {
+  return withLifecycle(inst.id, () => removeInstanceNow(inst, purgeVolume));
+}
+async function removeInstanceNow(inst: Instance, purgeVolume: boolean): Promise<void> {
   try {
     const c = docker.getContainer(inst.containerName);
     await c.remove({ force: true });
-  } catch {
-    /* 容器可能已不存在 */
+  } catch (e: any) {
+    if (e.statusCode !== 404) throw e;
   }
+  if (inst.cuaEnabled) cuaRegistry?.retire(inst.id);
   if (purgeVolume) {
     try {
       await removeVolumeWithData(inst.volumeName);
@@ -1180,6 +1230,7 @@ export async function latestInstanceImageId(): Promise<string | null> {
 // 实例是否「镜像落后」：其运行中容器的镜像 Id 与本地最新镜像不一致（即重建就会换新镜像）。
 // 容器不存在 / 查不到最新镜像时返回 false（不打扰）。传入 latestId 复用一次查询，避免 N 次 inspect。
 export async function instanceOutdated(inst: Instance, latestId: string | null): Promise<boolean> {
+  if (inst.cuaEnabled) latestId = cuaConfig ? await docker.getImage(cuaConfig.image).inspect().then(i => i.Id).catch(() => null) : null;
   if (!latestId) return false;
   try {
     const info: any = await docker.getContainer(inst.containerName).inspect();

@@ -1,7 +1,8 @@
 # 面板镜像：前端 Vite 打包 + 后端 Fastify 网关（多架构 amd64/arm64）
 
 # --- 1) 构建前端 ---
-FROM node:22-slim AS web
+ARG NODE_IMAGE=node:22-slim
+FROM ${NODE_IMAGE} AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -9,7 +10,7 @@ COPY web/ ./
 RUN npm run build
 
 # --- 2) 后端运行时 ---
-FROM node:22-slim AS runtime
+FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY server/package.json server/package-lock.json ./

@@ -146,3 +146,4 @@ dist
 # Cua canary build inputs, secrets, and local test captures
 /artifacts/
 /deploy/cua/secrets/
+/deploy/cua-panel/secrets/

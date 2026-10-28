@@ -1369,6 +1369,12 @@ function InstanceAdminCard({
         {!acting && !createFailed && ` · 可访问 ${userCount} 人`}
       </div>
       {createFailed && !acting && prov?.hint && <div className="inst-hint">{prov.hint}</div>}
+      {inst.cua?.enabled && <div className="inst-sub" title={inst.cua.name}>
+        Cua · {inst.cua.state === 'ready'
+          ? inst.cua.master?.status === 'registered' && Date.now() - Date.parse(inst.cua.master.at) < 45_000
+            ? '已接入 Master' : '桌面就绪，等待 Master 同步'
+          : inst.cua.state === 'offline' ? '离线' : inst.cua.state === 'error' ? '连接异常' : '正在准备'}
+      </div>}
 
       {working && (
         <div className="wx-progress">
@@ -1973,6 +1979,10 @@ const APP_OPTIONS: { type: AppType; desc: string; ready: boolean }[] = [
 ];
 
 function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose: () => void; onDone: () => void }) {
+  const [cuaAvailable, setCuaAvailable] = useState(false);
+  const [cuaEnabled, setCuaEnabled] = useState(false);
+  useEffect(() => { let alive = true; void api.cuaConfig().then(c => { if (alive) setCuaAvailable(c.enabled); }).catch(() => {});
+    return () => { alive = false; }; }, []);
   const [name, setName] = useState('');
   const [appType, setAppType] = useState<AppType>('wechat');
   const [sel, setSel] = useState<Set<string>>(new Set());
@@ -2002,7 +2012,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
     setBusy(true);
     try {
       // 服务端登记后立即返回、后台建容器（可能要先拉镜像）：关掉弹窗，进度和结果看卡片（#129）
-      await api.createInstance(name.trim(), [...sel], reuse || undefined, appType);
+      await api.createInstance(name.trim(), [...sel], reuse || undefined, appType, cuaEnabled);
       toast('实例已登记，正在后台创建，进度见卡片', 'info');
       onDone();
     } catch (e: any) {
@@ -2033,6 +2043,11 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           ))}
         </div>
         <input className="input" placeholder="实例名称（留空自动命名）" maxLength={30} value={name} onChange={(e) => setName(e.target.value)} />
+        {cuaAvailable && <label className="field-label" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input type="checkbox" checked={cuaEnabled} onChange={e => setCuaEnabled(e.target.checked)} />
+          接入 Cua（允许 Agent 访问此桌面）
+        </label>}
+        {cuaEnabled && <div className="muted small">创建后自动登记到 Master；当前为串行测试阶段，请勿与 Agent 同时操作。</div>}
         {appType === 'chromium' && (
           <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
         )}

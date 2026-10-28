@@ -8,6 +8,10 @@ import { randomUUID } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
+import { cuaConfig, watchdogInterval } from './cua/config.js';
+import { cuaRegistry } from './cua/registry.js';
+import { registerCuaRoutes } from './cua/routes.js';
+import { cuaInstanceStatus } from './docker.js';
 import {
   initStore,
   findByUsername,
@@ -236,6 +240,7 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
   }
   return u;
 }
+registerCuaRoutes(app, (req, reply) => !!requireAdmin(req, reply));
 
 // ---------- 登录 / 会话 ----------
 // 登录限速：NAS 面板常被直接暴露公网，无限速 = 可被无脑爆破。
@@ -497,14 +502,15 @@ app.get('/api/instances', async (req, reply) => {
   const visible = userInstances(u);
   const out = await Promise.all(
     visible.map(async (inst) => {
-      const [runtime, wx, imageVersion] = await Promise.all([
+      const [runtime, wx, imageVersion, cua] = await Promise.all([
         instanceRuntime(inst),
         wechatStatus(inst),
         instanceImageVersion(inst), // 实例镜像版本（CI label；自构建为短 id）——让用户能自查"到底跑的哪版"
+        cuaInstanceStatus(inst),
       ]);
       // 只下发 publicInstance：此前直接展开整条记录，连 kasm 凭据（store 里注明「永不下发前端」）和创建失败的原始报错也带给了浏览器
       const provision = provisionView(inst, runtime, u.role === 'admin');
-      return { ...publicInstance(inst), runtime, wechat: wx, imageVersion, ...(provision ? { provision } : {}) };
+      return { ...publicInstance(inst), runtime, wechat: wx, imageVersion, cua, ...(provision ? { provision } : {}) };
     }),
   );
   return { instances: out };
@@ -615,7 +621,9 @@ app.post('/api/admin/instances', async (req, reply) => {
     }
     reuseVolumeName = reuseVolume;
   }
-  const inst = createInstance(instName, admin.id, allowedUserIds, reuseVolumeName, type);
+  const cuaEnabled = (req.body as any)?.cuaEnabled === true;
+  if (cuaEnabled && !cuaConfig) return reply.code(400).send({ error: '当前部署未启用 Cua 集成' });
+  const inst = createInstance(instName, admin.id, allowedUserIds, reuseVolumeName, type, cuaEnabled);
   appendPanelLog(
     'INFO',
     `创建实例「${inst.name}」(${type}, id=${inst.id}) by ${admin.username}${reuseVolumeName ? ` · 复用卷 ${reuseVolumeName}` : ''} → 开始创建容器（镜像缺失会自动拉取，首次较慢）`,
@@ -797,6 +805,7 @@ app.post('/api/admin/instances/:id/start', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (inst.cuaEnabled) cuaRegistry?.stopped(inst.id, false);
   // 容器不存在（创建失败后点「重试创建」/ 容器被手动删了）= 重新创建，可能要拉镜像：和新建一样后台进行、立即返回
   if (provisioning.has(inst.id)) return { ok: true, started: true }; // 已在创建中：重复点击不再叠一次
   if ((await instanceRuntime(inst)) === 'missing') {
@@ -1950,6 +1959,7 @@ await resolveInstanceImage().catch(() => {});
 await ensureNetwork().catch(() => {});
 for (const pub of listInstances()) {
   const inst = findInstance(pub.id)!;
+  if (inst.cuaEnabled && cuaRegistry?.get(inst.id)?.desired === 'stopped') continue;
   // 上次创建没成功的实例不在这里自动重试：重试多半又要拉镜像，会把面板开始监听拖上好几分钟（期间整个面板打不开）。
   // 卡片会显示「创建失败」，等管理员点重试；容器其实已经建好了（创建途中面板重启）就清掉标记照常拉起。
   if (inst.createError) {
@@ -1991,7 +2001,7 @@ const DEFAULT_HARD_MB = Math.max(
   0,
   Number(process.env.WOC_INSTANCE_MEM_HARD_MB ?? process.env.WOC_INSTANCE_MEM_LIMIT_MB ?? 2500),
 );
-const WATCHDOG_INTERVAL_SEC = Math.max(60, Number(process.env.WOC_WATCHDOG_INTERVAL_SEC ?? 300));
+const WATCHDOG_INTERVAL_SEC = watchdogInterval(process.env.WOC_WATCHDOG_INTERVAL_SEC);
 // VNC 响应性探测默认关闭（=0）。实测健康实例 ~1ms 响应，但偶发宿主级 CPU/IO 争用（如同机重 docker build）
 // 会让探测超时被误判为 stall 而重启正常实例，故默认不启用；需要时设为正整数 N（连续 N 次无响应才重启）开启。
 const HEALTH_FAIL_LIMIT = Math.max(0, Number(process.env.WOC_WATCHDOG_HEALTH_FAILS ?? 0));

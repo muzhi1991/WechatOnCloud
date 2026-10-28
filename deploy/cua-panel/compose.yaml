@@ -1,0 +1,49 @@
+name: woc-cua-panel-p2
+services:
+  panel:
+    image: local/woc-panel:cua-p2
+    container_name: woc-cua-panel-p2
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 1g
+    memswap_limit: 1g
+    ports:
+      - "192.168.31.101:36082:8080"
+    command:
+      - /bin/sh
+      - -ec
+      - 'export PANEL_ADMIN_PASSWORD="$$(cat /run/secrets/panel-admin-password)"; exec npm run start'
+    environment:
+      PANEL_ADMIN_USER: admin
+      PANEL_DATA: /data/panel/accounts.json
+      WOC_PANEL_CONTAINER: woc-cua-panel-p2
+      WOC_INSTANCE_NETWORK: woc-cua-p2-instances
+      WOC_WECHAT_IMAGE: sha256:a2bc099e7d89f01eb26e9b95748f49612bb94533a923cde09685621a62233d8d
+      WOC_CUA_ENABLED: "1"
+      WOC_CUA_IMAGE: sha256:a2bc099e7d89f01eb26e9b95748f49612bb94533a923cde09685621a62233d8d
+      WOC_CUA_BIND_IP: 192.168.31.101
+      WOC_CUA_PUBLIC_HOST: 192.168.31.101
+      WOC_CUA_NAMESPACE: woc-p2
+      WOC_CUA_PORT_FIRST: "13320"
+      WOC_CUA_PORT_LAST: "13339"
+      WOC_CUA_HOST_SECRETS_DIR: /root/woc-cua-panel/deploy/cua-panel/secrets/instances
+      WOC_CUA_CPUS: "2"
+      WOC_INSTANCE_MEM_GB: "3"
+      WOC_WATCHDOG_INTERVAL_SEC: "0"
+      WOC_STUCK_HEAL: "0"
+      WOC_DISABLE_IMAGE_PRUNE: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - panel-data:/data/panel
+      - ./secrets/instances:/data/cua-secrets
+      - ./secrets/cua-sync-token:/run/secrets/cua-sync-token:ro
+      - ./secrets/panel-admin-password:/run/secrets/panel-admin-password:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  panel-data:
+    name: woc-cua-panel-p2-data

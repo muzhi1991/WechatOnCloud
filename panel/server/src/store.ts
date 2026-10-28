@@ -41,6 +41,7 @@ export function instanceAppType(i: Instance): AppType {
 }
 
 export interface Instance {
+  cuaEnabled?: boolean; // Opt-in only; existing instances remain unchanged.
   id: string; // 短 id，用于容器/卷命名
   name: string; // 显示名
   appType?: AppType; // 承载的应用类型；缺省（老实例）= wechat（见 instanceAppType）
@@ -256,6 +257,7 @@ function sanitizeInstanceIds(ids: string[]): string[] {
 
 export function publicInstance(i: Instance) {
   return {
+    cuaEnabled: !!i.cuaEnabled,
     id: i.id,
     name: i.name,
     appType: instanceAppType(i), // 老实例无字段时回退 wechat
@@ -335,6 +337,7 @@ export function createInstance(
   allowedUserIds: string[] = [],
   reuseVolumeName?: string,
   appType: AppType = 'wechat',
+  cuaEnabled = false,
 ) {
   const type: AppType = APP_TYPES.includes(appType) ? appType : 'wechat';
   let id = randomBytes(5).toString('hex'); // 10 hex chars
@@ -347,6 +350,7 @@ export function createInstance(
     volumeName = reuseVolumeName; // 始终指向旧卷（即便 id 是新生成的）
   }
   const inst: Instance = {
+    cuaEnabled,
     id,
     name: name.trim() || autoInstanceName(type),
     appType: type,

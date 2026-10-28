@@ -47,6 +47,7 @@ export const APP_PROFILES: Record<AppType, AppProfile> = {
 };
 export const appProfile = (t?: AppType): AppProfile => APP_PROFILES[t ?? 'wechat'] ?? APP_PROFILES.wechat;
 export interface PanelInstance {
+  cuaEnabled?: boolean;
   id: string;
   name: string;
   appType?: AppType; // 缺省（老实例）= wechat
@@ -66,6 +67,8 @@ export interface MemLimits {
   intervalSec: number;
 }
 export interface InstanceWithStatus extends PanelInstance {
+  cua?: { enabled: boolean; state: 'disabled' | 'starting' | 'ready' | 'offline' | 'error'; name?: string;
+    generation?: number; master?: { generation: number; status: 'registered' | 'error'; at: string } };
   runtime: RuntimeState;
   wechat: WechatStatus;
   imageVersion?: string | null; // 实例镜像版本（CI 发布版如 "1.4.0"；自构建为镜像短 id；容器缺失为 null）
@@ -311,10 +314,11 @@ export const api = {
 
   // 微信实例
   listInstances: () => req<{ instances: InstanceWithStatus[] }>('/api/instances'),
-  createInstance: (name: string, allowedUserIds: string[] = [], reuseVolume?: string, appType: AppType = 'wechat') =>
+  cuaConfig: () => req<{ enabled: boolean; namespace?: string }>('/api/admin/cua'),
+  createInstance: (name: string, allowedUserIds: string[] = [], reuseVolume?: string, appType: AppType = 'wechat', cuaEnabled = false) =>
     req<{ instance: PanelInstance; started?: boolean }>('/api/admin/instances', {
       method: 'POST',
-      body: JSON.stringify({ name, allowedUserIds, reuseVolume: reuseVolume || undefined, appType }),
+      body: JSON.stringify({ name, allowedUserIds, reuseVolume: reuseVolume || undefined, appType, cuaEnabled }),
     }),
   regenMachineId: (id: string) =>
     req(`/api/admin/instances/${id}/regen-machine-id`, { method: 'POST' }),
