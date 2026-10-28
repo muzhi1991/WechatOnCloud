@@ -5,6 +5,7 @@ import { browserImageCodec, fitPasteImage, pasteImageWithFallback } from '../pas
 import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
+import { Activity } from '../Activity';
 import { VncAudio } from '../vncAudio';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
@@ -643,6 +644,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const uploadBusy = useRef(false);
   const [starting, setStarting] = useState(false);
   const [control, setControl] = useState<ControlStatus | null>(null);
+  const controlState = useRef(control); controlState.current = control;
+  const activityOpen = useRef(false), maintenanceRequest = useRef(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'bg' | 'font'>('bg');
   const [bgList, setBgList] = useState<string[]>([]);
@@ -1004,6 +1007,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   // 与本会话曾撤掉的"激进自动重连"本质不同：那是连接态一抖就重连导致 churn；这里只在【确认致命崩溃】
   // 时重载一次，且 5min 内限 4 次、超限转手动恢复浮层，绝不死循环。
   const recoverFromFatal = (msg: string) => {
+    // Expected disconnects must not reload away a maintenance result or its dialog.
+    if (activityOpen.current || maintenanceRequest.current || controlState.current?.state === 'maintenance') return;
     if (recovering.current || !id) return;
     recovering.current = true;
     if (allowAutoRecover(id)) {
@@ -1427,6 +1432,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {MenuIcon}
         </button>
         <span className="ws-title">{title}</span>
+        {inst?.lifecycleEnabled && <Activity id={id} admin={isAdmin} onVisibilityChange={value => { activityOpen.current = value; }} onBusyChange={value => { maintenanceRequest.current = value; }} />}
         {showVnc && (
           // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕
           //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
@@ -1656,7 +1662,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {(inst?.controlManaged ? !control?.mine : control && !control.free && !control.mine) && (
             <div className="iv-lock">
               <div className="iv-lock-card">
-                <div className="iv-lock-title">{control?.state === "handover" ? "正在交接，等待旧操作结束" : control?.state === "faulted" ? "控制状态待恢复" : control?.holder ? `「${control.holder}」正在操作` : "当前为只读，可申请控制"}</div>
+                <div className="iv-lock-title">{control?.state === "maintenance" ? "维护中，暂停输入；进度见运行记录" : control?.state === "handover" ? "正在交接，等待旧操作结束" : control?.state === "faulted" ? "控制状态待恢复" : control?.holder ? `「${control.holder}」正在操作` : "当前为只读，可申请控制"}</div>
                 <div className="iv-lock-sub">为避免多端互相干扰，你当前为只读模式。</div>
                 <button className="btn btn-primary iv-notice-btn" disabled={control?.pending || control?.state === "faulted"} onClick={takeControl}>
                   申请控制

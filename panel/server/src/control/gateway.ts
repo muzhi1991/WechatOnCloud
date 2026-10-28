@@ -41,7 +41,7 @@ export function createControlGateway(resolve: () => GatewayTarget | undefined, l
       };
       // Do not cancel a dispatched mutation when its client disconnects: retain
       // the in-flight fence until the backend replies or becomes uncertain.
-      const result = kind === 'write' ? await leases.write(target.id, lease!.actor, lease!.epoch, run) : await run();
+      const result = kind === 'write' ? await leases.write(target.id, lease!.actor, lease!.epoch, run, req.url!.split('/').slice(-2).join('/')) : await run();
       if (!res.destroyed) {
         res.writeHead(result.status, { 'content-type': String(result.headers['content-type'] || 'application/grpc-web+proto'), 'cache-control': 'no-store' });
         res.end(result.body);

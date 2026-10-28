@@ -1,3 +1,9 @@
+import { withMaintenance, lifecycleEnabled, journal, assertInputCurrent } from './lifecycle/operations.js';
+import { createWriteStream, mkdirSync, statfsSync, statSync as fileStatSync, createReadStream, openSync, fsyncSync, closeSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
@@ -767,15 +773,21 @@ function withLifecycle<T>(instId: string, fn: () => Promise<T>): Promise<T> {
   lifecycleChains.set(instId, run.catch(() => undefined));
   return run;
 }
-export function runInstance(inst: Instance, opts?: { keepImage?: boolean }): Promise<void> {
-  return withLifecycle(inst.id, () => runInstanceNow(inst, opts));
+function rawRunInstance(inst: Instance, opts?: { keepImage?: boolean; image?: string; reason?: string; force?: boolean; repair?: boolean }): Promise<void> {
+  return withLifecycle(inst.id, async () => {
+    if (lifecycleEnabled && inst.cuaEnabled && !opts?.keepImage && await instanceRuntime(inst) !== 'missing') {
+      await docker.getImage(opts?.image || cuaConfig!.image).inspect();
+      await createManagedBackup(inst);
+    }
+    await runInstanceNow(inst, opts);
+  });
 }
-async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): Promise<void> {
+async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean; image?: string; reason?: string; force?: boolean; repair?: boolean }): Promise<void> {
   const net = await ensureNetwork();
   const existing = docker.getContainer(inst.containerName);
   const info: any = await existing.inspect().catch((e: any) => { if (e.statusCode === 404) return null; throw e; });
   const imageOverride: string | undefined = opts?.keepImage && info?.Image ? String(info.Image) : undefined;
-  const image = imageOverride || (inst.cuaEnabled ? cuaConfig?.image : WECHAT_IMAGE);
+  const image = opts?.image || imageOverride || (inst.cuaEnabled ? cuaConfig?.image : WECHAT_IMAGE);
   if (!image) throw new Error('Cua integration is not configured');
   // 沿用旧镜像重建时无需 ensureImage（镜像 id 一定在本地——容器刚在用它）；
   // 也避免"离线 + 本地无 :latest"时连重启都失败。
@@ -786,6 +798,7 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     // P2 uses a prebuilt, explicitly pinned derived image. No fallback to upstream/latest.
     const imageInfo = await docker.getImage(image).inspect();
     if (process.env.WOC_CONTROL_ENABLED === '1' && imageInfo.Config?.Labels?.['io.woc.cua.control'] !== '1') throw new Error('Managed control requires the P3 desktop image');
+    if (lifecycleEnabled && imageInfo.Config?.Labels?.['io.woc.cua.lifecycle'] !== '1') throw new Error('Managed lifecycle requires a P4-compatible desktop image');
     if (!imageInfo.Config?.Labels?.['io.woc.cua.version']) throw new Error('Selected image does not include WOC Cua integration');
   } else if (!imageOverride) await ensureImage(inst.id);
   const occupied = inst.cuaEnabled ? new Set((await docker.listContainers({ all: true }))
@@ -796,6 +809,7 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
     try {
       // 删除前先把旧容器最后日志快照进持久日志，否则随容器删除就看不到"上次为何停/崩"。
       await snapshotContainerLog(inst, '容器重建（重启/升级/自愈），保留上一容器最后日志');
+      if (lifecycleEnabled && inst.cuaEnabled && info.State?.Running) await existing.stop({ t: 10 });
       await existing.remove({ force: true });
     } catch {
       /* 已被移走，正常 */
@@ -882,7 +896,7 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean }): P
 // 确保实例容器在运行：缺失则按需创建（不会重建已有卷），停止则启动。
 // 只有容器确实不存在（404）才新建：Docker 一时连不上（socket-proxy 还没起来）时若也当成「不存在」去重建，
 // 重建那一刻网络多半也没探测到，实例会落到默认 bridge、桌面 502。
-export async function ensureRunning(inst: Instance): Promise<void> {
+async function rawEnsureRunning(inst: Instance): Promise<void> {
   const c = docker.getContainer(inst.containerName);
   let info: any;
   try {
@@ -903,7 +917,7 @@ export async function ensureRunning(inst: Instance): Promise<void> {
 // 拉取失败（本地自构建 / 离线 / 仓库不可达）则用本地现有镜像重建，不阻断。
 // skipPull：批量升级时由调用方先统一拉取一次，避免 N 个实例拉 N 次（受限网络下每次
 // 都要等到拉取停滞超时，表现为"一键升级卡死"）。
-export async function upgradeInstance(inst: Instance, opts?: { skipPull?: boolean }): Promise<void> {
+async function rawUpgradeInstance(inst: Instance, opts?: { skipPull?: boolean }): Promise<void> {
   if (inst.cuaEnabled) {
     const wasStopped = (await instanceRuntime(inst)) === 'stopped';
     await runInstance(inst); // Only WOC_CUA_IMAGE; never the upstream updater's fallback.
@@ -1036,7 +1050,7 @@ export async function pruneDanglingImages(): Promise<void> {
 // 重置实例的设备 machine-id：删掉持久化的 .woc-machine-id 后重启，由 00-woc-identity 钩子重新生成
 // 一个全新的唯一值（相当于"换一台新设备"）。用于某账号被腾讯风控标记后手动滚新设备身份。
 // 仅对含身份钩子的新镜像有效；旧镜像（升级前）无钩子，先 throw 提示升级，避免做无用功。
-export async function regenInstanceMachineId(inst: Instance): Promise<void> {
+async function rawRegenInstanceMachineId(inst: Instance): Promise<void> {
   const hasHook = (
     await execCapture(inst, [
       'sh',
@@ -1047,6 +1061,7 @@ export async function regenInstanceMachineId(inst: Instance): Promise<void> {
   if (hasHook !== 'yes') {
     throw new Error('该实例运行的是旧镜像（无设备身份模块），请先「升级实例」后再重置设备 ID');
   }
+  if (lifecycleEnabled && inst.cuaEnabled) await createManagedBackup(inst);
   // 删除持久化文件；重启时钩子检测到缺失 → 生成新的唯一 machine-id 并写回卷
   await execCapture(inst, ['sh', '-c', 'rm -f /config/.woc-machine-id']);
   await stopInstance(inst);
@@ -1054,7 +1069,7 @@ export async function regenInstanceMachineId(inst: Instance): Promise<void> {
 }
 
 // 停止实例容器（保留容器与数据卷，可再启动）。
-export async function stopInstance(inst: Instance): Promise<void> {
+async function rawStopInstance(inst: Instance): Promise<void> {
   if (inst.cuaEnabled) cuaRegistry?.stopped(inst.id, true);
   try {
     await docker.getContainer(inst.containerName).stop({ t: 5 } as any);
@@ -1065,7 +1080,7 @@ export async function stopInstance(inst: Instance): Promise<void> {
   }
 }
 
-export async function removeInstance(inst: Instance, purgeVolume: boolean): Promise<void> {
+async function rawRemoveInstance(inst: Instance, purgeVolume: boolean): Promise<void> {
   return withLifecycle(inst.id, () => removeInstanceNow(inst, purgeVolume));
 }
 async function removeInstanceNow(inst: Instance, purgeVolume: boolean): Promise<void> {
@@ -1435,16 +1450,26 @@ async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise
 // wechat-ctl.sh；telegram 等各自实现。兼容旧容器（升级前镜像里没有 /woc/app-ctl.sh）：有则用之，无则
 // 回退老的 wechat-ctl.sh（旧实例都是微信）。appType 取值受 instanceAppType 约束，可安全内插进 shell。
 export async function triggerWechat(inst: Instance, cmd: 'install' | 'update'): Promise<void> {
-  const c = docker.getContainer(inst.containerName);
   const at = instanceAppType(inst);
   const action = cmd === 'update' ? 'update' : 'install';
-  const exec = await execCreate(c, {
-    Cmd: ['bash', '-c', `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} ${action}; else /woc/wechat-ctl.sh ${action}; fi`],
-    AttachStdout: false,
-    AttachStderr: false,
-    User: 'abc',
-  });
-  await exec.start({ Detach: true });
+  const run = async (wait: boolean) => {
+    if (wait && cmd === 'update') await createManagedBackup(inst);
+    const exec = await execCreate(docker.getContainer(inst.containerName), {
+      Cmd: ['bash', '-c', `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} ${action}; else /woc/wechat-ctl.sh ${action}; fi`],
+      AttachStdout: false, AttachStderr: false, User: 'abc',
+    });
+    await exec.start({ Detach: true });
+    if (!wait) return;
+    const deadline = Date.now() + 20 * 60_000;
+    while (true) {
+      const info = await exec.inspect();
+      if (!info.Running) { if (info.ExitCode !== 0) throw new Error('应用安装进程失败，请检查维护记录'); return; }
+      if (Date.now() >= deadline) throw new Error('安装尚未完成，维护保持锁定');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  };
+  if (lifecycleEnabled && inst.cuaEnabled) await withMaintenance(inst, 'application-' + cmd, () => run(true));
+  else await run(false);
 }
 
 export interface WechatStatus {
@@ -1954,7 +1979,7 @@ async function putFileStream(inst: Instance, dir: string, name: string, size: nu
   }
 }
 
-export async function uploadToInstance(inst: Instance, name: string, size: number, body: AsyncIterable<Buffer>): Promise<void> {
+async function rawUploadToInstance(inst: Instance, name: string, size: number, body: AsyncIterable<Buffer>): Promise<void> {
   await putFileStream(inst, TRANSFER_DIR, name, size, body);
 }
 
@@ -1981,7 +2006,7 @@ export async function listInstanceFiles(inst: Instance): Promise<TransferFile[]>
     .sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
 }
 
-export async function deleteInstanceFile(inst: Instance, name: string): Promise<void> {
+async function rawDeleteInstanceFile(inst: Instance, name: string): Promise<void> {
   if (!safeName(name)) throw new Error('文件名不合法');
   // argv 数组直传，不经 shell；safeName 已排除路径穿越
   await execCapture(inst, ['rm', '-f', `${TRANSFER_DIR}/${name}`]);
@@ -2188,6 +2213,7 @@ function scheduleClipRestore(inst: Instance): void {
 // 用 base64 传递文本避免 shell 转义问题，xclip 写入剪贴板后 xdotool 模拟 Ctrl+V 粘贴；剪贴板打完归还（见上）。
 const managedInput = (inst: Instance) => process.env.WOC_CONTROL_ENABLED === '1' && !!inst.cuaEnabled;
 async function inputExec(inst: Instance, cmd: string[]) {
+  assertInputCurrent();
   return execCapture(inst, managedInput(inst) ? ['/woc/control/http-input', ...cmd] : cmd);
 }
 
@@ -2392,13 +2418,13 @@ export async function listVolume(inst: Instance, rel: string): Promise<{ path: s
   return { path: relOf(abs), entries };
 }
 
-export async function volMkdir(inst: Instance, rel: string): Promise<void> {
+async function rawVolMkdir(inst: Instance, rel: string): Promise<void> {
   const abs = safeVolPath(rel);
   if (abs === VOL_ROOT) throw new Error('路径不合法');
   await execCapture(inst, ['mkdir', '-p', abs]);
 }
 
-export async function volMove(inst: Instance, fromRel: string, toRel: string): Promise<void> {
+async function rawVolMove(inst: Instance, fromRel: string, toRel: string): Promise<void> {
   const from = safeVolPath(fromRel);
   const to = safeVolPath(toRel);
   if (from === VOL_ROOT || to === VOL_ROOT) throw new Error('不能移动数据卷根目录');
@@ -2406,14 +2432,14 @@ export async function volMove(inst: Instance, fromRel: string, toRel: string): P
   await execCapture(inst, ['mv', '-f', from, to]);
 }
 
-export async function volDelete(inst: Instance, rel: string): Promise<void> {
+async function rawVolDelete(inst: Instance, rel: string): Promise<void> {
   const abs = safeVolPath(rel);
   if (abs === VOL_ROOT) throw new Error('不能删除数据卷根目录');
   await execCapture(inst, ['rm', '-rf', abs]);
 }
 
 // 上传单个文件到指定目录（tar 头写 uid/gid 1000，落地即 abc 属主，微信可读）。流式写入，见 putFileStream。
-export async function volUploadFile(inst: Instance, rel: string, name: string, size: number, body: AsyncIterable<Buffer>): Promise<void> {
+async function rawVolUploadFile(inst: Instance, rel: string, name: string, size: number, body: AsyncIterable<Buffer>): Promise<void> {
   await putFileStream(inst, safeVolPath(rel), name, size, body);
 }
 
@@ -2457,7 +2483,7 @@ export async function volCheckArchive(path: string, mode: 'extract' | 'restore')
 
 // 上传压缩包并解压到指定目录（PC 微信数据迁移：用户把文件夹打成 .tar/.tar.gz 上传）。
 // putArchive 把 tar 内容解到 dir 下，Docker 解包限制在 dir 内、防 .. 穿越。gzip 在面板里流式解开。
-export async function volExtractArchive(inst: Instance, rel: string, archivePath: string, info: ArchiveInfo): Promise<void> {
+async function rawVolExtractArchive(inst: Instance, rel: string, archivePath: string, info: ArchiveInfo): Promise<void> {
   const dir = safeVolPath(rel);
   await execCapture(inst, ['mkdir', '-p', dir]).catch((e) => {
     throw friendlyWriteError(e);
@@ -2511,13 +2537,14 @@ export async function volBackupStream(inst: Instance): Promise<NodeJS.ReadableSt
 // 写之前先停掉实例、写完再启动（原本在运行的话）：此前在微信运行时直接覆盖它正开着的数据库文件，
 // 容易把聊天库写坏，而且界面上只是提示「恢复后请重启」。停止期间 docker 照样能往卷里写（docker cp 同理）。
 // 与重启 / 升级 / 自愈共用同一把生命周期锁，恢复中途不会被别的操作把容器拉起来。
-export async function volRestoreArchive(
+async function rawVolRestoreArchive(
   inst: Instance,
   archivePath: string,
   info: { gzip: boolean; bytes: number },
   onStage: (stage: string) => void,
 ): Promise<void> {
   await withLifecycle(inst.id, async () => {
+    if (lifecycleEnabled && inst.cuaEnabled) await createManagedBackup(inst);
     const c = docker.getContainer(inst.containerName);
     const state: any = await c.inspect().catch(() => null);
     if (!state) throw new Error('实例容器不存在：请先在卡片上启动一次实例，再恢复');
@@ -2531,20 +2558,22 @@ export async function volRestoreArchive(
       }
       appendInstanceLog(inst.id, '整卷恢复：已停止实例，开始写入备份');
     }
+    let restored = false;
     const tar = openTarStream(archivePath, info.gzip);
     try {
       onStage('写入数据');
       await putArchiveStream(inst, tar, '/');
+      restored = true;
       appendInstanceLog(inst.id, '整卷恢复：备份已写入');
     } catch (e) {
       appendInstanceLog(inst.id, `整卷恢复失败：${(e as any)?.message || e}`);
       throw friendlyWriteError(e);
     } finally {
       tar.destroy();
-      if (wasRunning) {
+      if (wasRunning && (restored || !lifecycleEnabled || !inst.cuaEnabled)) {
         onStage('启动实例');
         await c.start().catch((e: any) => {
-          if (e?.statusCode !== 304) appendInstanceLog(inst.id, `整卷恢复后启动实例失败：${e?.message || e}`);
+          if (e?.statusCode !== 304) { if (lifecycleEnabled && inst.cuaEnabled) throw e; appendInstanceLog(inst.id, `整卷恢复后启动实例失败：${e?.message || e}`); }
         });
       }
     }
@@ -2577,7 +2606,7 @@ export async function getBackgroundImage(inst: Instance, name: string, _thumb = 
   return extractSingleFileFromTar(Buffer.concat(chunks));
 }
 
-export async function uploadBackground(inst: Instance, name: string, content: Buffer): Promise<void> {
+async function rawUploadBackground(inst: Instance, name: string, content: Buffer): Promise<void> {
   if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['mkdir', '-p', BG_DIR]);
   await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: BG_DIR });
@@ -2595,14 +2624,14 @@ async function assertHasTool(inst: Instance, tool: string, msg: string): Promise
   if (!ok) throw new Error(msg);
 }
 
-export async function applyBackground(inst: Instance, name: string): Promise<void> {
+async function rawApplyBackground(inst: Instance, name: string): Promise<void> {
   if (!safeMediaName(name)) throw new Error('文件名不合法');
   await assertHasTool(inst, 'xwallpaper', '该实例镜像过旧（缺壁纸组件 xwallpaper）。请先在「管理」对该实例点「升级」，再设置壁纸。');
   await execCapture(inst, ['sh', '-c', `DISPLAY=:1 xwallpaper --zoom '${BG_DIR}/${name}' 2>/dev/null`]);
   await execCapture(inst, ['sh', '-c', `echo '${name}' > '${WP_FILE}'`]);
 }
 
-export async function deleteBackground(inst: Instance, name: string): Promise<void> {
+async function rawDeleteBackground(inst: Instance, name: string): Promise<void> {
   if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['rm', '-f', `${BG_DIR}/${name}`]);
   await execCapture(inst, ['sh', '-c', `if [ -f '${WP_FILE}' ] && [ "$(cat '${WP_FILE}')" = '${name}' ]; then rm -f '${WP_FILE}'; fi`]);
@@ -2615,7 +2644,7 @@ export async function getCurrentBackground(inst: Instance): Promise<string> {
   } catch { return ''; }
 }
 
-export async function clearBackground(inst: Instance): Promise<void> {
+async function rawClearBackground(inst: Instance): Promise<void> {
   await execCapture(inst, ['sh', '-c', 'DISPLAY=:1 xsetroot -solid black 2>/dev/null']);
   await execCapture(inst, ['rm', '-f', WP_FILE]);
 }
@@ -2630,14 +2659,14 @@ export async function listFonts(inst: Instance): Promise<string[]> {
   } catch { return []; }
 }
 
-export async function uploadFont(inst: Instance, name: string, content: Buffer): Promise<void> {
+async function rawUploadFont(inst: Instance, name: string, content: Buffer): Promise<void> {
   if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['mkdir', '-p', FONT_DIR]);
   await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: FONT_DIR });
   await execCapture(inst, ['fc-cache', '-f'], 'root');
 }
 
-export async function deleteFont(inst: Instance, name: string): Promise<void> {
+async function rawDeleteFont(inst: Instance, name: string): Promise<void> {
   if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['rm', '-f', `${FONT_DIR}/${name}`]);
   await execCapture(inst, ['fc-cache', '-f'], 'root');
@@ -2647,7 +2676,7 @@ const FONT_SEL_FILE = '/config/.woc-font';
 
 // 将字体的 fontconfig family name 设为用户首选（fallback 仍用文泉驿等系统字体）。
 // 设空字符串或 "default" 则清除偏好，回退系统默认。
-export async function applyFont(inst: Instance, fontFile: string): Promise<void> {
+async function rawApplyFont(inst: Instance, fontFile: string): Promise<void> {
   if (fontFile && !safeMediaName(fontFile)) throw new Error('文件名不合法');
   if (fontFile && fontFile !== 'default') {
     // 用 fc-scan 读取字体实际 family name（取第一个）
@@ -2762,4 +2791,126 @@ export { WECHAT_IMAGE };
 export async function controlExec(inst: Instance, hard: boolean): Promise<void> {
   if (hard) await execCapture(inst, ['/woc/control/fence'], 'root');
   else await execCapture(inst, ['/woc/control/http-input', 'bash', '-c', 'set -eu; source /run/woc-cua/session.env; python3 /woc/control/reset-input.py']);
+}
+
+export async function controlPauseApp(inst: Instance, pause: boolean): Promise<void> {
+  await execCapture(inst, pause ? ['touch', '/run/woc-control/pause-app'] : ['rm', '-f', '/run/woc-control/pause-app']);
+}
+
+export const runInstance = (...args: Parameters<typeof rawRunInstance>): ReturnType<typeof rawRunInstance> => withMaintenance(args[0], args[1]?.reason || (args[1]?.keepImage ? 'restart' : 'create-or-upgrade'), () => rawRunInstance(...args), { force: args[1]?.force, idleOnly: args[1]?.reason === 'watchdog-soft', repair: args[1]?.repair });
+
+export const stopInstance = (...args: Parameters<typeof rawStopInstance>): ReturnType<typeof rawStopInstance> => withMaintenance(args[0], 'stopInstance', () => rawStopInstance(...args));
+
+export const removeInstance = (...args: Parameters<typeof rawRemoveInstance>): ReturnType<typeof rawRemoveInstance> => withMaintenance(args[0], 'removeInstance', () => rawRemoveInstance(...args));
+
+export const regenInstanceMachineId = (...args: Parameters<typeof rawRegenInstanceMachineId>): ReturnType<typeof rawRegenInstanceMachineId> => withMaintenance(args[0], 'regenInstanceMachineId', () => rawRegenInstanceMachineId(...args));
+
+export const upgradeInstance = (...args: Parameters<typeof rawUpgradeInstance>): ReturnType<typeof rawUpgradeInstance> => withMaintenance(args[0], 'upgradeInstance', () => rawUpgradeInstance(...args));
+
+export async function ensureRunning(...args: Parameters<typeof rawEnsureRunning>): Promise<void> {
+  if (await instanceRuntime(args[0]) === 'running') return;
+  return withMaintenance(args[0], 'start', () => rawEnsureRunning(...args));
+}
+
+export const volRestoreArchive = (...args: Parameters<typeof rawVolRestoreArchive>): ReturnType<typeof rawVolRestoreArchive> => withMaintenance(args[0], 'volRestoreArchive', () => rawVolRestoreArchive(...args));
+
+export const volExtractArchive = (...args: Parameters<typeof rawVolExtractArchive>): ReturnType<typeof rawVolExtractArchive> => withMaintenance(args[0], 'volExtractArchive', () => rawVolExtractArchive(...args));
+
+export const volMkdir = (...args: Parameters<typeof rawVolMkdir>): ReturnType<typeof rawVolMkdir> => withMaintenance(args[0], 'volMkdir', () => rawVolMkdir(...args));
+
+export const volMove = (...args: Parameters<typeof rawVolMove>): ReturnType<typeof rawVolMove> => withMaintenance(args[0], 'volMove', () => rawVolMove(...args));
+
+export const volDelete = (...args: Parameters<typeof rawVolDelete>): ReturnType<typeof rawVolDelete> => withMaintenance(args[0], 'volDelete', () => rawVolDelete(...args));
+
+export const volUploadFile = (...args: Parameters<typeof rawVolUploadFile>): ReturnType<typeof rawVolUploadFile> => withMaintenance(args[0], 'volUploadFile', () => rawVolUploadFile(...args));
+
+export const uploadToInstance = (...args: Parameters<typeof rawUploadToInstance>): ReturnType<typeof rawUploadToInstance> => withMaintenance(args[0], 'uploadToInstance', () => rawUploadToInstance(...args));
+
+export const deleteInstanceFile = (...args: Parameters<typeof rawDeleteInstanceFile>): ReturnType<typeof rawDeleteInstanceFile> => withMaintenance(args[0], 'deleteInstanceFile', () => rawDeleteInstanceFile(...args));
+
+export const uploadBackground = (...args: Parameters<typeof rawUploadBackground>): ReturnType<typeof rawUploadBackground> => withMaintenance(args[0], 'uploadBackground', () => rawUploadBackground(...args));
+
+export const applyBackground = (...args: Parameters<typeof rawApplyBackground>): ReturnType<typeof rawApplyBackground> => withMaintenance(args[0], 'applyBackground', () => rawApplyBackground(...args));
+
+export const deleteBackground = (...args: Parameters<typeof rawDeleteBackground>): ReturnType<typeof rawDeleteBackground> => withMaintenance(args[0], 'deleteBackground', () => rawDeleteBackground(...args));
+
+export const clearBackground = (...args: Parameters<typeof rawClearBackground>): ReturnType<typeof rawClearBackground> => withMaintenance(args[0], 'clearBackground', () => rawClearBackground(...args));
+
+export const uploadFont = (...args: Parameters<typeof rawUploadFont>): ReturnType<typeof rawUploadFont> => withMaintenance(args[0], 'uploadFont', () => rawUploadFont(...args));
+
+export const deleteFont = (...args: Parameters<typeof rawDeleteFont>): ReturnType<typeof rawDeleteFont> => withMaintenance(args[0], 'deleteFont', () => rawDeleteFont(...args));
+
+export const applyFont = (...args: Parameters<typeof rawApplyFont>): ReturnType<typeof rawApplyFont> => withMaintenance(args[0], 'applyFont', () => rawApplyFont(...args));
+
+export async function createManagedBackup(inst: Instance): Promise<{ id: string; bytes: number; sha256: string }> {
+  if (!journal || !inst.cuaEnabled) throw new Error('受管备份未启用');
+  return withMaintenance(inst, 'backup', async () => {
+    const directory = process.env.WOC_BACKUP_DIR || '/data/panel/cua/backups';
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const fs = statfsSync(directory);
+    if (fs.bavail * fs.bsize < 2 * 1024 ** 3) throw new Error('备份空间不足 2 GiB，未修改实例');
+    const container = docker.getContainer(inst.containerName), before = await container.inspect();
+    const record = journal!.start(inst.id, 'backup', 'quiesced-volume', { details: { image: before.Image, volume: inst.volumeName, generation: cuaRegistry?.get(inst.id)?.generation || 0, lifecycleCompatible: before.Config.Labels?.['io.woc.cua.lifecycle'] === '1' } });
+    const path = join(directory, record + '.tar.gz');
+    const running = before.State.Running;
+    let bytes = 0; const hash = createHash('sha256');
+    try {
+      if (running) await container.stop({ t: 10 });
+      const stream = await volBackupStream(inst);
+      const quota = Number(process.env.WOC_BACKUP_TOTAL_GIB || 20) * 1024 ** 3;
+      const used = readdirSync(directory).filter(name => name.endsWith('.tar.gz')).reduce((n, name) => n + fileStatSync(join(directory, name)).size, 0);
+      if (!Number.isFinite(quota) || used >= quota) throw new Error('备份总容量已满，请先归档旧备份');
+      const limit = Math.min(Number(process.env.WOC_BACKUP_MAX_GIB || 10) * 1024 ** 3, fs.bavail * fs.bsize - 2 * 1024 ** 3, quota - used);
+      if (!Number.isFinite(limit) || limit <= 0) throw new Error('备份容量配置无效');
+      await pipeline(stream as any, new Transform({ transform(chunk, _encoding, callback) {
+        bytes += chunk.length;
+        if (bytes > limit) { callback(new Error('备份超过容量上限，未执行升级')); return; }
+        hash.update(chunk); callback(null, chunk);
+      } }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
+      const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); }
+      const dirfd = openSync(directory, 'r'); try { fsyncSync(dirfd); } finally { closeSync(dirfd); }
+      const sha256 = hash.digest('hex');
+      journal!.finish(record, 'done', undefined, { bytes, sha256 });
+      return { id: record, bytes, sha256 };
+    } catch (e) { journal!.finish(record, 'uncertain', 'backup-incomplete'); throw e; }
+    finally { if (running) await container.start(); }
+  });
+}
+export async function rollbackManagedImage(inst: Instance, backupId: string) {
+  const backup = journal?.get(backupId);
+  if (!backup || backup.instance !== inst.id || backup.kind !== 'backup' || backup.state !== 'done' || typeof backup.details?.image !== 'string') throw new Error('备份记录不匹配');
+  const target = await docker.getImage(backup.details.image).inspect();
+  if (target.Config?.Labels?.['io.woc.cua.lifecycle'] !== '1') throw new Error('该镜像早于 P4，需要按部署文档连同旧面板一起回退');
+  // Image rollback does not silently downgrade application data.
+  return runInstance(inst, { image: backup.details.image, reason: 'rollback-image', repair: true });
+}
+export async function restoreManagedBackup(inst: Instance, backupId: string) {
+  const backup = journal?.get(backupId);
+  if (!backup || backup.instance !== inst.id || backup.kind !== 'backup' || backup.state !== 'done') throw new Error('备份记录不匹配');
+  const path = join(process.env.WOC_BACKUP_DIR || '/data/panel/cua/backups', backup.id + '.tar.gz');
+  if (fileStatSync(path).size !== backup.details?.bytes) throw new Error('备份大小校验失败');
+  const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk);
+  if (hash.digest('hex') !== backup.details?.sha256) throw new Error('备份校验失败');
+  const info = await volCheckArchive(path, 'restore');
+  return withMaintenance(inst, 'restore-backup', () => volRestoreArchive(inst, path, info, () => {}), { repair: true });
+}
+
+export async function managedBackupStream(inst: Instance) {
+  const backup = await createManagedBackup(inst);
+  return createReadStream(join(process.env.WOC_BACKUP_DIR || '/data/panel/cua/backups', backup.id + '.tar.gz'));
+}
+export async function controlRuntimeIdentity(inst: Instance): Promise<string> {
+  const info = await docker.getContainer(inst.containerName).inspect().catch((e: any) => { if (e.statusCode === 404) return null; throw e; });
+  if (!info) return 'missing';
+  return `${info.Id}:${info.State.StartedAt}:${info.State.Running}`;
+}
+
+// End any installer/helper left behind by a lost panel process before reopening input.
+export async function reviewManagedMaintenance(inst: Instance) {
+  return withMaintenance(inst, 'administrator-review', async () => {
+    const container = docker.getContainer(inst.containerName);
+    const state = await instanceRuntime(inst);
+    if (state === 'running') { await container.stop({ t: 10 }); await container.start(); }
+    return { ok: true };
+  }, { repair: true });
 }

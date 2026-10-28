@@ -8,6 +8,9 @@ import { randomUUID } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
+import { lifecycleEnabled, journal, maintenanceState } from './lifecycle/operations.js';
+import { reviewManagedMaintenance, createManagedBackup, managedBackupStream, rollbackManagedImage, restoreManagedBackup } from './docker.js';
+import { watchdogDecision } from './lifecycle/watchdog.js';
 import { registerAgentControlRoutes } from './control/routes.js';
 import { managed, ensureControl, leases, requestActor, requestEpoch, humanActor, humanWrite, vncAuthorization, trackControlSocket, startControlGateways } from './control/runtime.js';
 import { cuaConfig, watchdogInterval } from './cua/config.js';
@@ -244,6 +247,26 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
 }
 registerCuaRoutes(app, (req, reply) => !!requireAdmin(req, reply));
 registerAgentControlRoutes(app);
+
+app.get('/api/instances/:id/activity', async (req, reply) => {
+  const user = requireAuth(req, reply); if (!user) return;
+  const id = (req.params as any).id;
+  if (!userCanAccess(user, id)) return reply.code(403).send({ error: '无权访问该实例' });
+  return { enabled: lifecycleEnabled, maintenance: maintenanceState(id), records: journal?.list(id) || [] };
+});
+for (const operation of ['review', 'backup', 'rollback-image', 'restore-backup'] as const) {
+  app.post(`/api/admin/instances/:id/maintenance/${operation}`, async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const inst = findInstance((req.params as any).id);
+    if (!lifecycleEnabled || !managed(inst)) return reply.code(404).send({ error: '受管维护未启用' });
+    if (operation === 'review') return reviewManagedMaintenance(inst!);
+    if (operation === 'backup') return createManagedBackup(inst!);
+    const backup = String((req.body as any)?.backup || '');
+    if (operation === 'rollback-image') await rollbackManagedImage(inst!, backup);
+    else await restoreManagedBackup(inst!, backup);
+    return { ok: true };
+  });
+}
 
 // ---------- 登录 / 会话 ----------
 // 登录限速：NAS 面板常被直接暴露公网，无限速 = 可被无脑爆破。
@@ -513,7 +536,7 @@ app.get('/api/instances', async (req, reply) => {
       ]);
       // 只下发 publicInstance：此前直接展开整条记录，连 kasm 凭据（store 里注明「永不下发前端」）和创建失败的原始报错也带给了浏览器
       const provision = provisionView(inst, runtime, u.role === 'admin');
-      return { ...publicInstance(inst), controlManaged: managed(inst), runtime, wechat: wx, imageVersion, cua, ...(provision ? { provision } : {}) };
+      return { ...publicInstance(inst), controlManaged: managed(inst), lifecycleEnabled: lifecycleEnabled && managed(inst), runtime, wechat: wx, imageVersion, cua, ...(provision ? { provision } : {}) };
     }),
   );
   return { instances: out };
@@ -582,7 +605,7 @@ app.post('/api/instances/:id/heal', async (req, reply) => {
   lastHealAt.set(id, now);
   appendPanelLog('WARN', `实例「${inst.name}」(id=${id}) 由 ${u.username} 触发卡死自愈（VNC 连不上 → 重启容器，数据保留）`);
   try {
-    await runInstance(inst, { keepImage: true }); // 自愈=重启，幂等：沿用当前镜像，绝不隐式换版
+    await runInstance(inst, { keepImage: true, reason: 'connection-recovery', force: true }); // 自愈=重启，幂等：沿用当前镜像，绝不隐式换版
     return { ok: true, restarted: true };
   } catch (e: any) {
     appendPanelLog('ERROR', `实例「${inst.name}」(id=${id}) 卡死自愈重启失败：${e?.message || e}`);
@@ -1454,7 +1477,7 @@ app.get('/api/admin/instances/:id/volume/backup', async (req, reply) => {
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
   try {
-    const stream = await volBackupStream(inst);
+    const stream = lifecycleEnabled && managed(inst) ? await managedBackupStream(inst) : await volBackupStream(inst);
     reply.header('content-type', 'application/gzip');
     reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`woc-${inst.name}-backup.tar.gz`)}`);
     return reply.send(stream);
@@ -1737,7 +1760,7 @@ async function onUpstreamHang(instId: string, what: string): Promise<void> {
   appendInstanceLog(instId, `[vnc] ${detail}`);
   appendPanelLog('WARN', `实例「${inst.name}」(id=${instId}) ${detail}`);
   try {
-    await runInstance(inst, { keepImage: true }); // 自愈=重启，幂等：沿用当前镜像，绝不隐式换版
+    await runInstance(inst, { keepImage: true, reason: 'connection-recovery', force: true }); // 自愈=重启，幂等：沿用当前镜像，绝不隐式换版
   } catch (e: any) {
     appendPanelLog('ERROR', `实例「${inst.name}」(id=${instId}) 卡死自愈重启失败：${e?.message || e}`);
   } finally {
@@ -2032,6 +2055,7 @@ await ensureNetwork().catch(() => {});
 await startControlGateways();
 for (const pub of listInstances()) {
   const inst = findInstance(pub.id)!;
+  if (maintenanceState(inst.id)) { leases.hold(inst.id, '等待核对未完成的维护'); continue; }
   if (inst.cuaEnabled && cuaRegistry?.get(inst.id)?.desired === 'stopped') continue;
   // 上次创建没成功的实例不在这里自动重试：重试多半又要拉镜像，会把面板开始监听拖上好几分钟（期间整个面板打不开）。
   // 卡片会显示「创建失败」，等管理员点重试；容器其实已经建好了（创建途中面板重启）就清掉标记照常拉起。
@@ -2091,6 +2115,7 @@ function effectiveLimits(inst: Instance): { soft: number; hard: number } {
 // “当前有人在远程会话”同时看两类信号：VNC WebSocket 表示仍在观看，控制权心跳表示最近
 // 有键鼠操作。Chrome 后台标签页会停止交互心跳，但只要桌面连接仍在，就不能做 soft 重启。
 function hasActiveSession(id: string): boolean {
+  if (lifecycleEnabled && (leases.busy(id) || maintenanceState(id))) return true;
   if (activeVncViewerCount(id) > 0) return true;
   const h = controlHolders.get(id);
   return !!h && Date.now() - h.at <= CONTROL_TTL;
@@ -2106,8 +2131,7 @@ if (WATCHDOG_ENABLED) {
     appendInstanceLog(inst.id, `[看门狗] 自愈重启（${reason}）：${detail}`);
     appendPanelLog('WARN', `[看门狗] 实例「${inst.name}」(id=${inst.id}) 自愈重启（${reason}）：${detail}`);
     try {
-      await stopInstance(inst);
-      await runInstance(inst, { keepImage: true }); // 自愈幂等：沿用当前镜像，绝不因本地 :latest 变了就隐式升级
+      await runInstance(inst, { keepImage: true, reason: 'watchdog-' + reason, force: reason !== 'soft' }); // 自愈幂等：沿用当前镜像，绝不因本地 :latest 变了就隐式升级
       healthFails.delete(inst.id);
       app.log.info(`[watchdog] ${inst.containerName} 自愈完成（${reason}）`);
     } catch (e: any) {
@@ -2121,7 +2145,7 @@ if (WATCHDOG_ENABLED) {
   const tick = async () => {
     for (const pub of listInstances()) {
       const inst = findInstance(pub.id);
-      if (!inst || recovering.has(inst.id)) continue;
+      if (!inst || recovering.has(inst.id) || maintenanceState(inst.id)) continue;
       try {
         if ((await instanceRuntime(inst)) !== 'running') {
           healthFails.delete(inst.id);
@@ -2133,11 +2157,12 @@ if (WATCHDOG_ENABLED) {
           const { soft, hard } = effectiveLimits(inst);
           const active = hasActiveSession(inst.id);
           const viewers = activeVncViewerCount(inst.id);
-          if (hard > 0 && mb >= hard) {
+          const decision = watchdogDecision(mb, soft, hard, active);
+          if (decision === 'hard') {
             await recover(inst, 'hard', `mem=${mb}MiB ≥ hard=${hard}MiB，强制重启（active=${active}, viewers=${viewers}）`);
             continue;
           }
-          if (soft > 0 && mb >= soft && !active) {
+          if (decision === 'soft') {
             await recover(inst, 'soft', `mem=${mb}MiB ≥ soft=${soft}MiB 且无活跃会话，柔和重启`);
             continue;
           }

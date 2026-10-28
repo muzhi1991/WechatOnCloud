@@ -1,3 +1,4 @@
+import { journal, maintenanceState } from '../lifecycle/operations.js';
 import { readFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
@@ -7,7 +8,7 @@ import { controlEnabled, managed, ensureControl, leases } from './runtime.js';
 import { ControlError, type Actor } from './leases.js';
 
 export function registerAgentControlRoutes(app: FastifyInstance) {
-  for (const operation of ['acquire', 'renew', 'release', 'status'] as const) {
+  for (const operation of ['acquire', 'renew', 'release', 'status', 'history'] as const) {
     app.post(`/api/integrations/control/:id/${operation}`, async (req, reply) => {
       reply.header('cache-control', 'no-store');
       if (!controlEnabled) return reply.code(503).send({ error: 'Managed control disabled' });
@@ -22,8 +23,9 @@ export function registerAgentControlRoutes(app: FastifyInstance) {
       if (!/^[a-f0-9-]{36}$/.test(body?.clientId || '')) return reply.code(400).send({ error: 'clientId must be a UUID' });
       const actor: Actor = { kind: 'agent', id: body.clientId, label: String(body.label || 'Agent').slice(0, 64) };
       try {
+        if (operation === 'history') return { maintenance: maintenanceState(inst!.id), records: journal?.list(inst!.id) || [] };
         await ensureControl(inst!);
-        if (operation === 'acquire') return { ...await leases.take(inst!.id, actor), endpoint: cuaRegistry!.get(inst!.id)!.endpoint };
+        if (operation === 'acquire') { const state = await leases.take(inst!.id, actor); return { ...state, taskId: journal?.task(inst!.id, state.epoch), endpoint: cuaRegistry!.get(inst!.id)!.endpoint }; }
         if (operation === 'renew') return leases.renew(inst!.id, actor, body.epoch);
         if (operation === 'release') return await leases.release(inst!.id, actor, body.epoch);
         return leases.status(inst!.id, actor);

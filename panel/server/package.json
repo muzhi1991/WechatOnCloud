@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "updater": "tsx src/updater-entry.ts",
-    "test:control": "node --import tsx --test src/control/*.test.ts"
+    "test:control": "node --import tsx --test src/control/*.test.ts",
+    "test:lifecycle": "node --import tsx --test src/lifecycle/*.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^9.4.0",

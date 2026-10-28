@@ -61,3 +61,23 @@ test('recovery waits for the entire HTTP action before fencing its input helper'
   const recovery=l.recover('a');assert.equal(l.status('a').state,'faulted');assert.equal(calls.filter(c=>c==='fence').length,1);
   finish();await action;await recovery;assert.equal(calls.filter(c=>c==='fence').length,2);assert.equal(l.status('a').state,'idle');
 });
+test('maintenance blocks old input, drains actions and rejects late HTTP helper dispatch',async()=>{
+  const {leases:l,adapter}=fixture();await l.ensure('a',1,adapter);const a=await l.take('a',agent);
+  let finish!:()=>void;const pending=new Promise<void>(r=>finish=r);let sent=false;
+  const action=l.write('a',agent,a.epoch,async check=>{await pending;check();sent=true;});
+  const draining=l.suspend('a','upgrade');assert.equal(l.status('a').state,'maintenance');await assert.rejects(l.take('a',human,true));
+  finish();await assert.rejects(action);await draining;assert.equal(sent,false);
+  l.prepareResume('a');await l.ensure('a',2,adapter,false,true);assert.equal(l.ready('a'),true);assert.equal(l.status('a').state,'maintenance');
+  l.endMaintenance('a');assert.equal(l.status('a').state,'idle');assert.ok((await l.take('a',human)).mine);
+});
+
+test('a durable journal failure revokes ownership before reporting the fault', async () => {
+  const { adapter } = fixture(); let fail = false;
+  const l = new ControlLeases(Date.now, 30000, { end: () => { if (fail) throw Error('disk full'); } });
+  await l.ensure('a', 1, adapter);
+  const grant = await l.take('a', agent); fail = true;
+  await l.release('a', agent, grant.epoch);
+  assert.equal(l.status('a').state, 'faulted');
+  assert.throws(() => l.agent('a', grant.token!), /有效/);
+  await assert.rejects(l.write('a', agent, grant.epoch, async () => {}), /失效/);
+});

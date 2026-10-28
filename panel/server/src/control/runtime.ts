@@ -3,13 +3,20 @@ import type { Socket } from 'node:net';
 import type { FastifyRequest } from 'fastify';
 import { cuaRegistry } from '../cua/registry.js';
 import { cuaConfig } from '../cua/config.js';
-import { findInstance, type Instance, type User } from '../store.js';
-import { controlExec } from '../docker.js';
+import { findInstance, listInstances, type Instance, type User } from '../store.js';
+import { controlExec, controlPauseApp, instanceRuntime, cuaInstanceStatus, controlRuntimeIdentity } from '../docker.js';
 import { ControlLeases, ControlError, type Actor } from './leases.js';
 import { createControlGateway } from './gateway.js';
 
+import { lifecycleEnabled, journal, maintenanceState, configureMaintenance, withInputContext, withMaintenance } from '../lifecycle/operations.js';
+
 export const controlEnabled = process.env.WOC_CONTROL_ENABLED === '1';
-export const leases = new ControlLeases();
+export const leases = new ControlLeases(Date.now, 30_000, {
+  grant: (id, actor, epoch, generation) => { if (actor.kind === 'agent') journal?.start(id, 'task', actor.label, { epoch, details: { generation } }); },
+  end: (id, epoch, reason) => journal?.endTask(id, epoch, reason),
+  action: (id, actor, epoch, name) => journal?.start(id, 'action', name, { epoch, parent: journal.task(id, epoch), details: { actor: actor.kind } }),
+  result: (action, ok) => journal?.finish(action, ok ? 'done' : 'uncertain', ok ? undefined : 'inspect-before-retry'),
+});
 export const derived = (id: string, purpose: string) => createHmac('sha256', cuaRegistry!.token(id)).update(purpose).digest('hex');
 export const viewToken = (id: string) => derived(id, 'woc-cua-view-v1');
 export const managed = (inst?: Instance) => controlEnabled && !!inst?.cuaEnabled;
@@ -36,7 +43,18 @@ async function kasm(inst: Instance, path: string, body?: unknown) {
   if (/"success"\s*:\s*false/i.test(text)) throw new ControlError('KasmVNC 拒绝权限更新', 503);
   return text;
 }
-export async function ensureControl(inst: Instance) {
+const runtimeIdentity = new Map<string, string>();
+export async function ensureControl(inst: Instance, duringMaintenance = false) {
+  const maintenance = maintenanceState(inst.id);
+  if (maintenance && !duringMaintenance) { leases.hold(inst.id, maintenance.name); return; }
+  if (lifecycleEnabled) {
+    const identity = await controlRuntimeIdentity(inst);
+    const previous = runtimeIdentity.get(inst.id);
+    runtimeIdentity.set(inst.id, identity);
+    if (previous && identity !== previous && !duringMaintenance) {
+      await withMaintenance(inst, 'runtime-changed', async () => {}, { force: true });
+    }
+  }
   const record = cuaRegistry?.get(inst.id);
   if (!managed(inst) || !record || record.desired !== 'running') throw new ControlError('受管桌面未运行', 503);
   await leases.ensure(inst.id, record.generation, {
@@ -46,6 +64,7 @@ export async function ensureControl(inst: Instance) {
     },
     reset: async hard => {
       await controlExec(inst, hard);
+      if (lifecycleEnabled) await controlPauseApp(inst, false);
       if (hard) {
         const deadline = Date.now() + 10_000;
         while (true) {
@@ -58,8 +77,9 @@ export async function ensureControl(inst: Instance) {
         }
       }
     },
+    grantAgent: async () => { if (lifecycleEnabled) await controlPauseApp(inst, true); },
     grantHuman: async password => { await kasm(inst, 'update_user', [{ user: 'woc-human', password, write: true, read: true, owner: false }]); },
-  });
+  }, false, duringMaintenance);
 }
 export function humanActor(u: User, client: unknown): Actor {
   if (typeof client !== 'string' || !/^[a-f0-9-]{36}$/.test(client)) throw new ControlError('缺少浏览器标签页标识', 400);
@@ -70,7 +90,7 @@ export function requestEpoch(req: FastifyRequest) { return String(req.headers['x
 export async function humanWrite<T>(u: User, req: FastifyRequest, inst: Instance, action: () => Promise<T>) {
   if (!managed(inst)) return action();
   await ensureControl(inst);
-  return leases.write(inst.id, requestActor(u, req), requestEpoch(req), action);
+  return leases.write(inst.id, requestActor(u, req), requestEpoch(req), check => withInputContext(check, action), req.routeOptions.url || 'human-input');
 }
 export function vncAuthorization(inst: Instance, u: User, client: string | null, epoch: string | null) {
   let username = 'woc-view', password = derived(inst.id, 'woc-control-viewer-v1');
@@ -91,4 +111,34 @@ export async function startControlGateways() {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '0.0.0.0', resolve); });
   }
   setInterval(() => leases.tick(), 1000).unref();
+  if (lifecycleEnabled) {
+    let checking = false;
+    setInterval(async () => {
+      if (checking) return; checking = true;
+      try { for (const inst of listInstances()) if (managed(inst) && leases.busy(inst.id) && !maintenanceState(inst.id)) await ensureControl(inst).catch(() => {}); }
+      finally { checking = false; }
+    }, 5000).unref();
+  }
 }
+
+configureMaintenance({
+  finish: inst => leases.endMaintenance(inst.id),
+  busy: id => leases.busy(id),
+  enter: async (inst, reason, force) => {
+    await leases.suspend(inst.id, reason, force);
+    await disconnect(inst.id);
+    if (await instanceRuntime(inst) === 'running') await controlPauseApp(inst, true).catch(() => {});
+  },
+  leave: async inst => {
+    leases.prepareResume(inst.id);
+    if (await instanceRuntime(inst) !== 'running') return;
+    runtimeIdentity.set(inst.id, await controlRuntimeIdentity(inst));
+    const deadline = Date.now() + 60_000;
+    while ((await cuaInstanceStatus(inst)).state !== 'ready') {
+      if (Date.now() >= deadline) throw new ControlError('实例尚未恢复就绪，维护保持锁定');
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    await ensureControl(inst, true);
+    if (!leases.ready(inst.id)) throw new ControlError('控制服务尚未恢复，维护保持锁定');
+  },
+});

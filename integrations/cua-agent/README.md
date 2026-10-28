@@ -39,3 +39,13 @@ node integrations/cua-agent/agent.mjs CONFIG release INSTANCE
 - 原始 `/mcp`、进程/Shell、隧道、文件写入、脚本/批处理重放、viewer ticket 和连续流接口未开放。当前提供这个 CLI 适配器，未注册新的 MCP 工具。
 - 网关提供协作互斥，不隔离不可信 OS 用户。通过获准的桌面操作启动终端或后台进程，仍有可能在租约结束后继续运行；任务必须遵守交接，不另起持久输入自动化。独立后台任务使用原通用 Cua worker。
 - Token 只在私有文件、请求头和 Cua 子进程环境中流转，不作为命令行参数或正常输出。旧租约文件可能仍存在，但服务端不再接受。
+
+## P4 运行记录
+
+启用 P4 的面板在 `acquire` 返回稳定的 `taskId`（一次租约控制会话）。通过以下命令读取任务、动作、维护与备份结果，即使实例停止也可查询：
+
+```sh
+node integrations/cua-agent/agent.mjs /path/to/agent.json history INSTANCE_ID
+```
+
+`done` 表示服务确认完成；`interrupted` 表示控制会话或维护被打断；`uncertain` 表示动作可能已经生效。先查看桌面和实际结果，再决定下一步，不能把后两者当作可直接重试的失败。面板重启、外部容器重启和维护都会使旧租约失效；CLI 不续接或重放旧任务。维护未完成时，需要管理员在网页“运行记录”处理，再重新 `acquire`。

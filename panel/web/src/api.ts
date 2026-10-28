@@ -1,6 +1,6 @@
 export interface ControlStatus {
   free: boolean; mine: boolean; holder: string | null; managed?: boolean;
-  state?: 'idle' | 'human' | 'agent' | 'handover' | 'faulted'; epoch?: string; pending?: boolean;
+  state?: 'idle' | 'human' | 'agent' | 'handover' | 'faulted' | 'maintenance'; epoch?: string; pending?: boolean;
 }
 // Generated per page load (including two tabs sharing the same login cookie).
 const clientBytes = crypto.getRandomValues(new Uint8Array(16));
@@ -8,6 +8,13 @@ const clientHex = Array.from(clientBytes, b => b.toString(16).padStart(2, '0')).
 export const controlClientId = [clientHex.slice(0,8),clientHex.slice(8,12),clientHex.slice(12,16),clientHex.slice(16,20),clientHex.slice(20)].join('-');
 const controlEpochs = new Map<string, string>();
 export const controlHeaders = (id: string, epoch?: string) => ({ 'x-woc-client': controlClientId, 'x-woc-epoch': epoch ?? controlEpochs.get(id) ?? '' });
+
+export interface ActivityRecord {
+  id: string; kind: 'task' | 'action' | 'maintenance' | 'backup'; name: string;
+  state: 'running' | 'done' | 'interrupted' | 'uncertain'; at: number; reason?: string;
+  details?: Record<string, string | number | boolean>;
+}
+export interface InstanceActivity { enabled: boolean; records: ActivityRecord[]; maintenance: { name: string; state: string; active: boolean } | null }
 
 export interface PanelUser {
   id: string;
@@ -59,6 +66,7 @@ export const APP_PROFILES: Record<AppType, AppProfile> = {
 export const appProfile = (t?: AppType): AppProfile => APP_PROFILES[t ?? 'wechat'] ?? APP_PROFILES.wechat;
 export interface PanelInstance {
   controlManaged?: boolean;
+  lifecycleEnabled?: boolean;
   cuaEnabled?: boolean;
   id: string;
   name: string;
@@ -371,6 +379,8 @@ export const api = {
   // started=true：容器不存在，已转为后台重新创建（进度看 provision），不是「已启动」
   instanceStart: (id: string) => req<{ ok: boolean; started?: boolean }>(`/api/admin/instances/${id}/start`, { method: 'POST' }),
   instanceStop: (id: string) => req(`/api/admin/instances/${id}/stop`, { method: 'POST' }),
+  activity: (id: string) => req<InstanceActivity>(`/api/instances/${id}/activity`),
+  maintenance: (id: string, operation: 'review' | 'backup' | 'rollback-image' | 'restore-backup', backup?: string) => req(`/api/admin/instances/${id}/maintenance/${operation}`, { method: 'POST', body: JSON.stringify({ backup }) }),
   instanceRestart: (id: string) => req(`/api/admin/instances/${id}/restart`, { method: 'POST' }),
   // 单实例升级：异步（后端登记后立即返回），轮询 upgradeStatus().upgradingIds 直到该 id 移出。
   instanceUpgrade: (id: string) => req<{ ok: boolean; started: boolean }>(`/api/admin/instances/${id}/upgrade`, { method: 'POST' }),

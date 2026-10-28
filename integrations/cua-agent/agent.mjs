@@ -2,7 +2,7 @@
 // Managed Cua CLI: credentials stay in this trusted Master process and private
 // lease files. Every GUI call still uses the official cua spacesd client.
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -10,7 +10,7 @@ import { curlRequest } from '../cua-master-sync/sync.mjs';
 const execute = promisify(execFile);
 async function main() {
   const [configPath, command, id, method, json = '{}'] = process.argv.slice(2);
-  if (!configPath || !['acquire','renew','call','release','status'].includes(command) || !/^[a-f0-9]{10}$/.test(id || '')) throw Error('Usage: node agent.mjs CONFIG acquire|renew|call|release|status INSTANCE [Service/Method] [JSON]');
+  if (!configPath || !['acquire','renew','call','release','status','history'].includes(command) || !/^[a-f0-9]{10}$/.test(id || '')) throw Error('Usage: node agent.mjs CONFIG acquire|renew|call|release|status|history INSTANCE [Service/Method] [JSON]');
   const config=JSON.parse(readFileSync(configPath,'utf8'));
   const directory=config.leaseDir;
   mkdirSync(directory,{recursive:true,mode:0o700});
@@ -36,7 +36,7 @@ async function main() {
     }
     throw Error('Handover still pending; no input was sent');
   }
-  if(command==='status'){console.log(JSON.stringify(await request('status')));return;}
+  if(command==='status'||command==='history'){console.log(JSON.stringify(await request(command)));return;}
   if(!lease)throw Error('No local lease; acquire control first');
   if(command==='renew'){console.log(JSON.stringify(await request('renew',{epoch:lease.epoch})));return;}
   if(command==='release'){const state=await request('release',{epoch:lease.epoch});unlinkSync(file);console.log(JSON.stringify(state));return;}
