@@ -149,3 +149,5 @@ dist
 /deploy/cua-panel/secrets/
 
 /deploy/cua-control/secrets/
+
+/deploy/desktop/secrets/

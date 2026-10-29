@@ -1,3 +1,4 @@
+import { desktopImage, validateMode, instanceMode } from './desktop.js';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import fstatic from '@fastify/static';
@@ -598,6 +599,7 @@ app.post('/api/instances/:id/heal', async (req, reply) => {
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const inst = findInstance(id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (instanceMode(inst) === 'desktop') return { ok: true, restarted: false, message: '完整桌面不会因连接失败自动重启，请从管理入口手动检查' };
   const now = Date.now();
   if (now - (lastHealAt.get(id) || 0) < 180000) {
     return { ok: true, restarted: false, message: '近期已尝试恢复，请稍候重连' };
@@ -630,12 +632,15 @@ app.post('/api/instances/:id/clientlog', async (req, reply) => {
 app.post('/api/admin/instances', async (req, reply) => {
   const admin = requireAdmin(req, reply);
   if (!admin) return;
-  const { name, reuseVolume, appType } = (req.body as any) ?? {};
+  const { name, reuseVolume, appType, mode: requestedMode } = (req.body as any) ?? {};
   const allowedUserIds = Array.isArray((req.body as any)?.allowedUserIds) ? (req.body as any).allowedUserIds : [];
   // 名称可留空（自动命名为「微信 1」这类，见 store.ts）；新建弹窗的占位文字一直写着「留空自动命名」，此前却必填
   const instName = typeof name === 'string' ? name.trim() : '';
   if (instName.length > 30) return reply.code(400).send({ error: '实例名称最多 30 个字符' });
-  const type: AppType = APP_TYPES.includes(appType) ? appType : 'wechat';
+  let mode;
+  try { mode = validateMode(requestedMode, reuseVolume); if (mode === 'desktop' && !desktopImage()) throw new Error('当前部署未配置完整桌面镜像'); }
+  catch (e: any) { return reply.code(400).send({ error: e.message }); }
+  const type: AppType = mode === 'desktop' ? 'custom' : APP_TYPES.includes(appType) ? appType : 'wechat';
   // 复用卷：必须以 woc-data- 开头，且不能被现存实例占用。后端先校验，避免坏名穿透到 docker run。
   let reuseVolumeName: string | undefined;
   if (reuseVolume) {
@@ -647,9 +652,10 @@ app.post('/api/admin/instances', async (req, reply) => {
     }
     reuseVolumeName = reuseVolume;
   }
-  const cuaEnabled = (req.body as any)?.cuaEnabled === true;
+  const cuaEnabled = mode === 'desktop' || (req.body as any)?.cuaEnabled === true;
+  if (mode === 'desktop' && process.env.WOC_CONTROL_ENABLED !== '1') return reply.code(400).send({ error: '完整桌面首版需要启用受管控制' });
   if (cuaEnabled && !cuaConfig) return reply.code(400).send({ error: '当前部署未启用 Cua 集成' });
-  const inst = createInstance(instName, admin.id, allowedUserIds, reuseVolumeName, type, cuaEnabled);
+  const inst = createInstance(instName, admin.id, allowedUserIds, reuseVolumeName, type, cuaEnabled, mode);
   appendPanelLog(
     'INFO',
     `创建实例「${inst.name}」(${type}, id=${inst.id}) by ${admin.username}${reuseVolumeName ? ` · 复用卷 ${reuseVolumeName}` : ''} → 开始创建容器（镜像缺失会自动拉取，首次较慢）`,
@@ -738,8 +744,8 @@ app.get('/api/admin/instances/:id/mem-limits', async (req, reply) => {
   return {
     soft: inst.memSoftLimitMB ?? null,
     hard: inst.memHardLimitMB ?? null,
-    defaultSoft: DEFAULT_SOFT_MB,
-    defaultHard: DEFAULT_HARD_MB,
+    defaultSoft: instanceMode(inst) === 'desktop' ? 0 : DEFAULT_SOFT_MB,
+    defaultHard: instanceMode(inst) === 'desktop' ? 0 : DEFAULT_HARD_MB,
     currentMB,
     watchdogEnabled: WATCHDOG_ENABLED,
     intervalSec: WATCHDOG_INTERVAL_SEC,
@@ -2107,8 +2113,8 @@ const WATCHDOG_ENABLED = WATCHDOG_INTERVAL_SEC > 0 && (DEFAULT_SOFT_MB > 0 || DE
 // 单实例生效阈值：per-instance 覆盖优先；为 undefined 则用 env 默认。
 function effectiveLimits(inst: Instance): { soft: number; hard: number } {
   return {
-    soft: inst.memSoftLimitMB ?? DEFAULT_SOFT_MB,
-    hard: inst.memHardLimitMB ?? DEFAULT_HARD_MB,
+    soft: inst.memSoftLimitMB ?? (instanceMode(inst) === 'desktop' ? 0 : DEFAULT_SOFT_MB),
+    hard: inst.memHardLimitMB ?? (instanceMode(inst) === 'desktop' ? 0 : DEFAULT_HARD_MB),
   };
 }
 
@@ -2173,7 +2179,7 @@ if (WATCHDOG_ENABLED) {
         // 2) 响应性自愈：探测 VNC 是否还能提供页面；连续 N 次无响应 → 重启。
         //    应对"进程没死、显示在线，但 I/O/服务 stall 读不出 VNC 文件、永远卡在正在连接桌面"。
         //    默认关闭（HEALTH_FAIL_LIMIT=0）：偶发宿主级争用会误判健康实例为 stall；需要时用 env 开启。
-        if (HEALTH_FAIL_LIMIT > 0) {
+        if (HEALTH_FAIL_LIMIT > 0 && instanceMode(inst) === 'app') {
           const healthy = await instanceHttpHealthy(inst);
           if (healthy) {
             healthFails.delete(inst.id);

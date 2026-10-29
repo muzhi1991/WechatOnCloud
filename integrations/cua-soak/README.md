@@ -44,6 +44,8 @@ ssh root@192.168.31.101 'systemctl stop woc-p5-soak-20261028'
 
 配置字段见 `soak.py`：显式限定 panelUrl、endpoint、deploymentId、instance、desktopContainer、containers、两条 token 文件路径、独立 outputDir、durationHours、intervalSeconds。先用**不同 outputDir** 的配置 `--once`，再启动正式采样，避免覆盖 run.json 基线。
 
+完整桌面可另设 `requiredProcesses: ["openbox", "tint2", "xsettingsd", "cua-spacesd", "Xvnc"]`。缺省仍检查原 P5 微信进程，旧记录报告保持兼容。D1 只将更新后的采样器部署到自己的目录，不替换现有 P5 运行文件。
+
 ```sh
 python3 -m unittest discover -s integrations/cua-soak -p 'test_*.py'
 ```

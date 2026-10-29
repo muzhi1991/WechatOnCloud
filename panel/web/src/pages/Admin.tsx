@@ -1317,7 +1317,7 @@ function InstanceAdminCard({
     return () => document.removeEventListener('mousedown', onDocDown);
   }, [menuOpen]);
 
-  const profile = appProfile(inst.appType);
+  const profile = appProfile(inst.appType, inst.mode);
 
   let badge: { text: string; cls: string };
   if (acting) badge = { text: '处理中', cls: 'tag-busy' };
@@ -1326,7 +1326,7 @@ function InstanceAdminCard({
   else if (offline) badge = { text: inst.runtime === 'missing' ? '未创建' : '已停止', cls: 'tag-off' };
   else if (busy) badge = { text: '处理中', cls: 'tag-busy' };
   else if (installed) badge = { text: '在线', cls: 'tag-on' };
-  else badge = { text: '待安装', cls: 'tag-warn' };
+  else badge = { text: inst.mode === 'desktop' ? '桌面未就绪' : '待安装', cls: 'tag-warn' };
 
   let sub: string;
   if (acting) sub = acting;
@@ -1336,7 +1336,7 @@ function InstanceAdminCard({
   else if (wx.phase === 'error') sub = wx.message || '操作失败，可重试';
   else if (offline) sub = inst.runtime === 'missing' ? '容器尚未创建' : '容器已停止';
   else if (installed) sub = wx.version ? `${profile.label} ${wx.version}` : `${profile.label}已就绪`;
-  else sub = `${profile.label}尚未安装`;
+  else sub = inst.mode === 'desktop' ? '桌面组件尚未就绪，请稍候或查看日志' : `${profile.label}尚未安装`;
 
   return (
     <div className={'inst-card' + (menuOpen ? ' open-menu' : '')}>
@@ -1568,13 +1568,13 @@ function InstanceIconEditor({ inst, onClose, onDone }: { inst: InstanceWithStatu
         ) : (
           <>
             <div className="icon-edit-top">
-              <InstanceIcon icon={sel || undefined} appType={inst.appType} size={56} radius={14} />
+              <InstanceIcon icon={sel || undefined} appType={inst.appType} mode={inst.mode} size={56} radius={14} />
               <div className="muted small">预览（{sel.startsWith('data:') ? '自定义图片' : sel.startsWith('builtin:') ? '内置图标' : '按应用默认'}）</div>
             </div>
             <div className="field-label">内置图标</div>
             <div className="icon-grid">
               <button type="button" className={'icon-pick' + (sel === '' ? ' sel' : '')} onClick={() => setSel('')}>
-                <InstanceIcon appType={inst.appType} size={38} radius={11} />
+                <InstanceIcon appType={inst.appType} mode={inst.mode} size={38} radius={11} />
                 <span>默认</span>
               </button>
               {ICON_CHOICES.map((c) => (
@@ -1979,10 +1979,12 @@ const APP_OPTIONS: { type: AppType; desc: string; ready: boolean }[] = [
 ];
 
 function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose: () => void; onDone: () => void }) {
+  const [mode, setMode] = useState<'app' | 'desktop'>('app');
+  const [desktopAvailable, setDesktopAvailable] = useState(false);
   const [cuaAvailable, setCuaAvailable] = useState(false);
   const [managedCua, setManagedCua] = useState(false);
   const [cuaEnabled, setCuaEnabled] = useState(false);
-  useEffect(() => { let alive = true; void api.cuaConfig().then(c => { if (alive) { setCuaAvailable(c.enabled); setManagedCua(!!c.controlManaged); } }).catch(() => {});
+  useEffect(() => { let alive = true; void api.cuaConfig().then(c => { if (alive) { setDesktopAvailable(!!c.desktopAvailable); setCuaAvailable(c.enabled); setManagedCua(!!c.controlManaged); } }).catch(() => {});
     return () => { alive = false; }; }, []);
   const [name, setName] = useState('');
   const [appType, setAppType] = useState<AppType>('wechat');
@@ -2013,7 +2015,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
     setBusy(true);
     try {
       // 服务端登记后立即返回、后台建容器（可能要先拉镜像）：关掉弹窗，进度和结果看卡片（#129）
-      await api.createInstance(name.trim(), [...sel], reuse || undefined, appType, cuaEnabled);
+      await api.createInstance(name.trim(), [...sel], mode === 'desktop' ? undefined : reuse || undefined, appType, cuaEnabled, mode);
       toast('实例已登记，正在后台创建，进度见卡片', 'info');
       onDone();
     } catch (e: any) {
@@ -2027,7 +2029,13 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
     <div className="modal-mask" onClick={onClose}>
       <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h2>新建实例</h2>
-        <div className="field-label">应用类型</div>
+        <div className="field-label">实例模式</div>
+        <div className="app-picker">
+          <button type="button" className={'app-pick' + (mode === 'app' ? ' sel' : '')} onClick={() => setMode('app')}><span className="app-pick-name">应用模式</span><span className="app-pick-desc">围绕微信、浏览器等主应用</span></button>
+          <button type="button" disabled={!desktopAvailable} className={'app-pick' + (mode === 'desktop' ? ' sel' : '')} onClick={() => { setMode('desktop'); setReuse(''); }}><span className="app-pick-name">完整桌面</span><span className="app-pick-desc">{desktopAvailable ? '任务栏、文件管理器、多窗口' : '当前部署未配置桌面镜像'}</span></button>
+        </div>
+        {mode === 'desktop' && <div className="muted small">创建一台独立的空白 Linux 桌面。浏览器、文件管理器和终端开箱可用；应用可正常关闭和最小化。</div>}
+        {mode === 'app' && <><div className="field-label">应用类型</div>
         <div className="app-picker">
           {APP_OPTIONS.map((o) => (
             <button
@@ -2043,16 +2051,17 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
             </button>
           ))}
         </div>
+        </>}
         <input className="input" placeholder="实例名称（留空自动命名）" maxLength={30} value={name} onChange={(e) => setName(e.target.value)} />
         {cuaAvailable && <label className="field-label" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input type="checkbox" checked={cuaEnabled} onChange={e => setCuaEnabled(e.target.checked)} />
+          <input type="checkbox" checked={mode === 'desktop' || cuaEnabled} disabled={mode === 'desktop'} onChange={e => setCuaEnabled(e.target.checked)} />
           接入 Cua（允许 Agent 访问此桌面）
         </label>}
-        {cuaEnabled && <div className="muted small">{managedCua ? '创建后自动接入 Cua。Agent 操作需申请控制；人工可在桌面随时接管。' : '创建后自动登记到 Master；当前为串行测试阶段，请勿与 Agent 同时操作。'}</div>}
-        {appType === 'chromium' && (
+        {(cuaEnabled || mode === 'desktop') && <div className="muted small">{managedCua ? '创建后自动接入 Cua。Agent 操作需申请控制；人工可在桌面随时接管。' : '创建后自动登记到 Master；当前为串行测试阶段，请勿与 Agent 同时操作。'}</div>}
+        {mode === 'app' && appType === 'chromium' && (
           <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
         )}
-        {appType === 'qq' && (
+        {mode === 'app' && appType === 'qq' && (
           <div className="muted small">QQ 为腾讯官方 Linux 版，安装包从腾讯官方下载（约 180MB）。</div>
         )}
         <div className="field-label">允许访问的子账号（管理员默认可访问全部）</div>
@@ -2062,7 +2071,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           onToggle={(id) => setSel((s) => toggleSet(s, id))}
           empty="暂无子账号"
         />
-        {orphans.length > 0 && (
+        {mode === 'app' && orphans.length > 0 && (
           <>
             <div className="field-label" style={{ marginTop: 12 }}>数据卷（可选）</div>
             <select className="input" value={reuse} onChange={(e) => setReuse(e.target.value)}>
@@ -2081,8 +2090,8 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
         )}
         {err && <div className="error">{err}</div>}
         <div className="muted small" style={{ marginTop: 4 }}>
-          创建后在后台拉起一个新的 {APP_LABELS[appType]} 容器（本地没有实例镜像时先自动拉取，首次可能要几分钟，进度见卡片）
-          {appProfile(appType).needsInstall ? `；建好后点卡片上的「下载安装${APP_LABELS[appType]}」，再进入实例登录。` : '。'}
+          创建后在后台准备新的{mode === 'desktop' ? '完整桌面' : APP_LABELS[appType]}实例，进度见卡片
+          {appProfile(appType, mode).needsInstall ? `；建好后点卡片上的「下载安装${APP_LABELS[appType]}」，再进入实例登录。` : '。'}
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>

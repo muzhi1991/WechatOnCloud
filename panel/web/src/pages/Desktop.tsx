@@ -1,3 +1,4 @@
+import { DesktopControls } from '../DesktopControls';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, appProfile, fmtUploadSize, provisionProgressText, controlClientId, type ControlStatus } from '../api';
@@ -9,11 +10,14 @@ import { Activity } from '../Activity';
 import { VncAudio } from '../vncAudio';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
-function desktopUrl(id: string, managed = false, epoch = "") {
+function desktopUrl(id: string, managed = false, epoch = "", fullDesktop = false) {
   const path = `desktop/${id}/websockify` + (managed ? `?wocClient=${controlClientId}&wocEpoch=${epoch}` : "");
+  // Kasm's seamless clipboard requires browser APIs unavailable over LAN HTTP.
+  // Keep the explicit panel input/clipboard bridge usable without a fatal Kasm overlay.
+  const seamlessClipboard = !fullDesktop || (window.isSecureContext && typeof ClipboardItem !== 'undefined' && !!navigator.clipboard);
   return (
-    `/desktop/${id}/vnc/index.html?autoconnect=1&path=${encodeURIComponent(path)}&resize=remote` +
-    '&reconnect=true&reconnect_delay=2000&clipboard_up=true&clipboard_down=true&clipboard_seamless=true'
+    `/desktop/${id}/vnc/index.html?autoconnect=1&path=${encodeURIComponent(path)}&resize=${fullDesktop ? 'scale' : 'remote'}${fullDesktop ? '&pointer_lock=false' : ''}` +
+    `&reconnect=true&reconnect_delay=2000&clipboard_up=true&clipboard_down=true&clipboard_seamless=${seamlessClipboard}`
   );
 }
 
@@ -613,7 +617,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     const v = !autoEnter;
     setAutoEnter(v);
     try {
-      window.localStorage.setItem('woc_ime_auto_enter', v ? '1' : '0');
+      window.localStorage.setItem(inst?.mode === 'desktop' ? 'woc_desktop_ime_auto_enter' : 'woc_ime_auto_enter', v ? '1' : '0');
     } catch {
       /* ignore */
     }
@@ -658,6 +662,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const fontInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const lastBeat = useRef(0);
   const audioRef = useRef<VncAudio | null>(null);
@@ -672,7 +677,12 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   };
 
   const inst = instances.find((i) => i.id === id);
-  const profile = appProfile(inst?.appType); // 按应用类型显示正确文案（微信/Chromium…）
+  useEffect(() => {
+    if (!inst) return;
+    try { setAutoEnter(inst.mode === 'desktop' ? localStorage.getItem('woc_desktop_ime_auto_enter') === '1' : localStorage.getItem('woc_ime_auto_enter') !== '0'); }
+    catch { setAutoEnter(inst.mode !== 'desktop'); }
+  }, [id, inst?.mode]);
+  const profile = appProfile(inst?.appType, inst?.mode); // 按应用类型显示正确文案（微信/Chromium…）
   const appLabel = profile.label;
   // 进入实例时，共享列表可能尚未同步（管理页新建/安装后），先按"探测中"显示加载态，
   // 等列表刷新到该实例或超时后再判定是否真的不存在，避免从管理页跳转时误报"实例不存在"。
@@ -829,7 +839,6 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     }
   }, [id]);
   const readOnly = inst?.controlManaged ? !control?.mine : !!control && !control.free && !control.mine; // 别人在操作：只读
-
   useEffect(() => {
     if (!inst?.controlManaged || !control?.mine) return;
     const timer = window.setInterval(() => { if (!document.hidden) void beat(); }, 5000);
@@ -1382,7 +1391,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const restartInstance = async () => {
     const ok = await confirm({
       title: '重启该实例？',
-      body: `会重建容器（数据保留），${appLabel}重新启动，约十几秒；用于修复卡死/最小化丢失等。`,
+      body: inst?.mode === 'desktop' ? '会重启完整桌面并关闭当前应用，数据卷保留。请先保存应用内尚未保存的内容。' : `会重建容器（数据保留），${appLabel}重新启动，约十几秒；用于修复卡死/最小化丢失等。`,
       confirmText: '重启',
     });
     if (!ok) return;
@@ -1437,6 +1446,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕
           //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
           <div className="ws-actions">
+            {inst?.mode === 'desktop' && <DesktopControls id={id} frameRef={frameRef} stageRef={stageRef} frameGen={frameGen} readOnly={readOnly} epoch={control?.epoch} pressKey={pressKey} />}
+
             {inst?.controlManaged && control?.mine && <button className="ws-action" onClick={() => void api.controlRelease(id).then(setControl).catch(e => toast(e.message, 'error'))}>交回控制</button>}
             <button
               className="ws-action"
@@ -1491,7 +1502,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 <button className={'ws-action' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
                   桌面
                 </button>
-                <button className="ws-action" title="重启实例（修复卡死/最小化丢失）" onClick={restartInstance}>
+                <button className="ws-action" title={inst?.mode === 'desktop' ? '重启完整桌面（关闭当前应用）' : '重启实例（修复卡死/最小化丢失）'} onClick={restartInstance}>
                   重启
                 </button>
               </>
@@ -1556,6 +1567,14 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             </div>
           </div>
         </div>
+      ) : !installed && inst.mode === 'desktop' ? (
+        <div className="iv-stage iv-center">
+          <div className="iv-notice">
+            <div className="iv-notice-title">桌面组件尚未就绪</div>
+            <div className="iv-notice-sub">启动完成后会自动显示。若持续停留在此处，请查看日志或从管理页检查实例。</div>
+            {isAdmin && <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(id), '_blank')}>查看日志</button>}
+          </div>
+        </div>
       ) : !installed ? (
         <div className="iv-stage iv-center">
           <div className="iv-notice">
@@ -1580,7 +1599,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           </div>
         </div>
       ) : (
-        <div className="iv-stage iv-stage--vnc">
+        <div ref={stageRef} className="iv-stage iv-stage--vnc">
           <div className="iv-canvas">
           {/* 切勿给本 iframe 加 key（如 key={id}）：那会让切换实例时 React 重挂 iframe（先删旧元素再建新元素），
               旧元素被删时 ws 未必干净关闭 → 实例服务端残留半开连接 → 回到该实例再开新 ws 时新旧并存把 Xvnc 卡死
@@ -1589,9 +1608,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           <iframe
             ref={frameRef}
             className="iv-frame"
-            src={desktopUrl(id, inst?.controlManaged, control?.epoch)}
+            src={desktopUrl(id, inst?.controlManaged, control?.epoch, inst?.mode === 'desktop')}
             title={`${appLabel} · 实例桌面`}
-            allow="clipboard-read; clipboard-write; microphone; camera; autoplay"
+            allowFullScreen
+            allow="clipboard-read; clipboard-write; microphone; camera; autoplay; fullscreen"
             onLoad={() => {
               setFrameLoaded(true);
               setFrameGen((g) => g + 1); // iframe 页内换文档时也要重挂监听（见 frameGen 定义处）

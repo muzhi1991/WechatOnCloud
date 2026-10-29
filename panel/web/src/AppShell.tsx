@@ -53,6 +53,7 @@ export function statusOf(inst: InstanceWithStatus): { cls: string; text: string 
   if (offline) return { cls: 'st-off', text: inst.runtime === 'missing' ? '未创建' : '已停止' };
   if (BUSY.includes(inst.wechat.phase)) return { cls: 'st-busy', text: '处理中' };
   if (inst.wechat.installed) return { cls: 'st-on', text: '在线' };
+  if (inst.mode === 'desktop') return { cls: 'st-warn', text: '桌面未就绪' };
   return { cls: 'st-warn', text: '待安装' };
 }
 
@@ -201,7 +202,7 @@ function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggl
           return (
             <button key={inst.id} className={'sb-item sb-inst' + (on ? ' on' : '')} onClick={() => go(`/i/${inst.id}`)} title={inst.name}>
               <span className="sb-avatar">
-                <InstanceIcon icon={inst.icon} appType={inst.appType} size={34} radius={10} />
+                <InstanceIcon icon={inst.icon} appType={inst.appType} mode={inst.mode} size={34} radius={10} />
                 <span className={'sb-dot ' + st.cls} />
               </span>
               {!collapsed && <span className="sb-label">{inst.name}</span>}
@@ -381,7 +382,7 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
           <div className="inst-grid">
             {instances.map((inst) => {
               const st = statusOf(inst);
-              const prof = appProfile(inst.appType);
+              const prof = appProfile(inst.appType, inst.mode);
               const meta = inst.wechat.installed
                 ? `${prof.label} ${inst.wechat.version || ''}`.trim()
                 : inst.runtime === 'running' && prof.needsInstall
@@ -390,7 +391,7 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
               return (
                 <button key={inst.id} className="home-card" onClick={() => nav(`/i/${inst.id}`)}>
                   <span className="home-card-av">
-                    <InstanceIcon icon={inst.icon} appType={inst.appType} size={42} radius={12} />
+                    <InstanceIcon icon={inst.icon} appType={inst.appType} mode={inst.mode} size={42} radius={12} />
                   </span>
                   <span className="home-card-main">
                     <span className="home-card-name">{inst.name}</span>

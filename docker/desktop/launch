@@ -1,0 +1,19 @@
+#!/bin/bash
+set -eu
+case "${1:-}" in
+ files) exec pcmanfm /config ;;
+ terminal) exec xterm -fa 'DejaVu Sans Mono' -fs 11 ;;
+ browser)
+   exec chromium --no-sandbox --disable-gpu --no-first-run --no-default-browser-check \
+     --password-store=basic --disable-background-networking --disable-breakpad \
+     --disk-cache-size=268435456 --media-cache-size=67108864 --user-data-dir=/config/chromium
+   ;;
+ wechat|telegram|qq)
+   . /woc/app-defs.sh
+   woc_app_def "$1"
+   if [ -x "$APP_BIN" ]; then exec $APP_LAUNCH; fi
+   # Explicit desktop menu action opens a visible installer. No background startup install.
+   exec xterm -T "安装 $APP_NAME" -fa 'DejaVu Sans Mono' -fs 11 -e bash -c '/woc/app-ctl.sh "$1" install; result=$?; printf "\n安装进程退出码：%s。完成后可从菜单启动应用。按回车关闭。\n" "$result"; read -r' _ "$1"
+   ;;
+ *) echo 'Unknown desktop application' >&2; exit 2 ;;
+esac

@@ -1,0 +1,33 @@
+#!/bin/bash
+set -eu
+exec 9>/run/woc-control/desktop-session.lock
+flock -n 9 || exit 0
+export LIBGL_ALWAYS_SOFTWARE=1
+/woc/cua/publish-session
+# Generic GTK/Qt font and DPI configuration; 96 DPI in XSETTINGS is 96 * 1024.
+python3 - <<'PY'
+from pathlib import Path
+import json
+family=Path('/config/.woc-font-family')
+font=family.read_text().strip() if family.exists() else 'WenQuanYi Micro Hei'
+Path('/config/.xsettingsd').write_text('Xft/Antialias 1\nXft/Hinting 1\nXft/HintStyle "hintslight"\nXft/RGBA "rgb"\nXft/DPI 98304\nGtk/FontName '+json.dumps(font+' 10',ensure_ascii=False)+'\n')
+PY
+xsettingsd --config=/config/.xsettingsd &
+settings=$!
+xsetroot -solid '#223246'
+# Preserve the panel's generic wallpaper contract, including resize and file changes.
+(
+  last=''
+  while sleep 2; do
+    file=$(cat /config/.wallpaper 2>/dev/null) || continue
+    case "$file" in ''|*/*|*..*) continue;; esac
+    [ -f "/config/backgrounds/$file" ] || continue
+    signature="$file:$(stat -c %Y "/config/backgrounds/$file"):$(xrandr | head -1)"
+    if [ "$signature" != "$last" ]; then xwallpaper --zoom "/config/backgrounds/$file" && last=$signature; fi
+  done
+) &
+wallpaper=$!
+tint2 -c /config/.config/tint2/woc.tint2rc &
+panel=$!
+trap 'kill "$panel" "$settings" "$wallpaper" 2>/dev/null || true' EXIT
+wait "$panel"

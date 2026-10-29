@@ -54,6 +54,7 @@ export const BUILTIN_ICONS: Record<string, Glyph> = {
   youtube: G('#ff0000', play),
   globe: G('#5b8def', globe),
   app: G('#8a9099', dots),
+  desktop: G('#385b88', <g fill="none" stroke="#fff" strokeWidth="2.5"><rect x="10" y="11" width="28" height="21" rx="2"/><path d="M24 32v6M17 38h14"/></g>),
 };
 // 「内置图标」选择器里展示的可选项（顺序即展示顺序）
 export const ICON_CHOICES: { key: string; label: string }[] = [
@@ -80,11 +81,13 @@ const DEFAULT_BY_APP: Record<AppType, string> = {
 export function InstanceIcon({
   icon,
   appType,
+  mode,
   size = 36,
   radius = 12,
 }: {
   icon?: string;
   appType?: AppType;
+  mode?: 'app' | 'desktop';
   size?: number;
   radius?: number;
 }) {
@@ -93,7 +96,7 @@ export function InstanceIcon({
     return <img src={icon} width={size} height={size} alt="" style={{ borderRadius: radius, objectFit: 'cover', display: 'block' }} />;
   }
   // 2) 内置 / 3) 默认
-  const key = icon && icon.startsWith('builtin:') ? icon.slice(8) : DEFAULT_BY_APP[appType ?? 'wechat'] ?? 'app';
+  const key = icon && icon.startsWith('builtin:') ? icon.slice(8) : mode === 'desktop' ? 'desktop' : DEFAULT_BY_APP[appType ?? 'wechat'] ?? 'app';
   const g = BUILTIN_ICONS[key] ?? BUILTIN_ICONS.app;
   return (
     <svg width={size} height={size} viewBox="0 0 48 48" style={{ display: 'block' }} aria-hidden="true">

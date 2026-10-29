@@ -1,3 +1,4 @@
+import { desktopImage } from '../desktop.js';
 import { managed, viewToken } from '../control/runtime.js';
 import { readFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
@@ -10,7 +11,7 @@ import { cuaRegistry } from './registry.js';
 export function registerCuaRoutes(app: FastifyInstance, admin: (req: FastifyRequest, reply: FastifyReply) => boolean) {
   app.get('/api/admin/cua', async (req, reply) => {
     if (!admin(req, reply)) return;
-    return { enabled: !!cuaConfig, namespace: cuaConfig?.namespace, controlManaged: process.env.WOC_CONTROL_ENABLED === '1' };
+    return { desktopAvailable: !!desktopImage() && !!cuaConfig && process.env.WOC_CONTROL_ENABLED === '1', enabled: !!cuaConfig, namespace: cuaConfig?.namespace, controlManaged: process.env.WOC_CONTROL_ENABLED === '1' };
   });
   // A separate machine identity: cookies/admin sessions never authorize secret export.
   const machine = (req: FastifyRequest, reply: FastifyReply) => {

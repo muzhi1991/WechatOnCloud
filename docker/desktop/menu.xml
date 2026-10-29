@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="应用">
+    <item label="浏览器"><action name="Execute"><command>/woc/desktop/launch browser</command></action></item>
+    <item label="文件管理器"><action name="Execute"><command>/woc/desktop/launch files</command></action></item>
+    <item label="终端"><action name="Execute"><command>/woc/desktop/launch terminal</command></action></item>
+    <separator label="通讯应用（首次点击安装）"/>
+    <item label="微信"><action name="Execute"><command>/woc/desktop/launch wechat</command></action></item>
+    <item label="Telegram"><action name="Execute"><command>/woc/desktop/launch telegram</command></action></item>
+    <item label="QQ"><action name="Execute"><command>/woc/desktop/launch qq</command></action></item>
+    <separator/>
+    <item label="显示桌面"><action name="ToggleShowDesktop"/></item>
+    <menu id="client-list-combined-menu"/>
+  </menu>
+</openbox_menu>

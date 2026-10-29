@@ -1,0 +1,47 @@
+#!/bin/bash
+set -eu
+# A desktop image is never silently used as an application image.
+[ "${WOC_INSTANCE_MODE:-}" = desktop ]
+mkdir -p /config/.desktop /config/Desktop
+# Stable generic Linux identity, without hiding the container or spoofing its distribution.
+if [ ! -s /config/.desktop/machine-id ]; then tr -d '-' < /proc/sys/kernel/random/uuid > /config/.desktop/machine-id; fi
+install -m 444 /config/.desktop/machine-id /etc/machine-id
+install -m 444 /config/.desktop/machine-id /var/lib/dbus/machine-id
+mkdir -p /config/.config/openbox /config/.config/tint2 /config/.local/share/applications /config/.fonts /config/workspace /config/Desktop
+# Parent directories must be writable by the desktop user, including on a fresh volume.
+chown "${PUID:-1000}:${PGID:-1000}" /config/.config /config/.local /config/.local/share /config/.fonts
+if [ ! -e /config/.local/share/fonts ]; then ln -s /config/.fonts /config/.local/share/fonts; fi
+# Restoring the system fontconfig override requires root; the session runs as abc.
+if [ -f /config/.woc-fc-local.conf ]; then cp /config/.woc-fc-local.conf /etc/fonts/local.conf; fi
+cp /defaults/autostart /config/.config/openbox/autostart
+chmod 755 /config/.config/openbox/autostart
+cp /woc/desktop/tint2rc /config/.config/tint2/woc.tint2rc
+cp /woc/desktop/menu.xml /config/.config/openbox/woc-menu.xml
+python3 - <<'PY'
+import xml.etree.ElementTree as ET
+from pathlib import Path
+# Own only this generated profile; preserve the user's other configuration files.
+p=Path('/etc/xdg/openbox/rc.xml')
+ns='http://openbox.org/3.4/rc'
+ET.register_namespace('', ns)
+root=ET.fromstring(p.read_text())
+tag=lambda n:'{'+ns+'}'+n
+keyboard=root.find(tag('keyboard'))
+for key, action, command in [('W-e','Execute','/woc/desktop/launch files'),('W-t','Execute','/woc/desktop/launch terminal'),('W-b','Execute','/woc/desktop/launch browser'),('W-d','ToggleShowDesktop',None),('W-space','ShowMenu','root-menu')]:
+    for old in list(keyboard):
+        if old.get('key')==key: keyboard.remove(old)
+    k=ET.SubElement(keyboard,tag('keybind'),{'key':key})
+    a=ET.SubElement(k,tag('action'),{'name':action})
+    if command: ET.SubElement(a,tag('menu' if action=='ShowMenu' else 'command')).text=command
+menu=root.find(tag('menu'))
+for child in list(menu):
+    if child.tag==tag('file'): menu.remove(child)
+ET.SubElement(menu,tag('file')).text='/config/.config/openbox/woc-menu.xml'
+# WOC app profile may maximize/decorate all windows specially; use standard desktop rules.
+apps=root.find(tag('applications'))
+if apps is not None: root.remove(apps)
+ET.ElementTree(root).write('/config/.config/openbox/rc.xml',encoding='utf-8',xml_declaration=True)
+for key,name,icon in [('browser','浏览器','web-browser'),('files','文件管理器','system-file-manager'),('terminal','终端','utilities-terminal'),('wechat','微信','internet-chat'),('telegram','Telegram','internet-chat'),('qq','QQ','internet-chat')]:
+    Path('/config/.local/share/applications/woc-'+key+'.desktop').write_text('[Desktop Entry]\nType=Application\nName='+name+'\nExec=/woc/desktop/launch '+key+'\nIcon='+icon+'\nTerminal=false\nCategories=Utility;\n')
+PY
+chown -R "${PUID:-1000}:${PGID:-1000}" /config/.config/openbox /config/.config/tint2 /config/.local/share/applications /config/workspace /config/Desktop

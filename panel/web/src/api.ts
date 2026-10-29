@@ -63,8 +63,10 @@ export const APP_PROFILES: Record<AppType, AppProfile> = {
   qq: { label: 'QQ', needsInstall: true, enterHint: '首次进入请用手机 QQ 扫码登录', updateLabel: '更新 QQ' },
   custom: { label: '自定义应用', needsInstall: true, enterHint: '', updateLabel: '更新' },
 };
-export const appProfile = (t?: AppType): AppProfile => APP_PROFILES[t ?? 'wechat'] ?? APP_PROFILES.wechat;
+const DESKTOP_PROFILE: AppProfile = { label: '完整桌面', needsInstall: false, enterHint: '使用任务栏、应用菜单或终端启动应用', updateLabel: '' };
+export const appProfile = (t?: AppType, mode?: 'app' | 'desktop'): AppProfile => mode === 'desktop' ? DESKTOP_PROFILE : APP_PROFILES[t ?? 'wechat'] ?? APP_PROFILES.wechat;
 export interface PanelInstance {
+  mode?: 'app' | 'desktop';
   controlManaged?: boolean;
   lifecycleEnabled?: boolean;
   cuaEnabled?: boolean;
@@ -336,11 +338,11 @@ export const api = {
 
   // 微信实例
   listInstances: () => req<{ instances: InstanceWithStatus[] }>('/api/instances'),
-  cuaConfig: () => req<{ enabled: boolean; namespace?: string; controlManaged?: boolean }>('/api/admin/cua'),
-  createInstance: (name: string, allowedUserIds: string[] = [], reuseVolume?: string, appType: AppType = 'wechat', cuaEnabled = false) =>
+  cuaConfig: () => req<{ desktopAvailable?: boolean; enabled: boolean; namespace?: string; controlManaged?: boolean }>('/api/admin/cua'),
+  createInstance: (name: string, allowedUserIds: string[] = [], reuseVolume?: string, appType: AppType = 'wechat', cuaEnabled = false, mode: 'app' | 'desktop' = 'app') =>
     req<{ instance: PanelInstance; started?: boolean }>('/api/admin/instances', {
       method: 'POST',
-      body: JSON.stringify({ name, allowedUserIds, reuseVolume: reuseVolume || undefined, appType, cuaEnabled }),
+      body: JSON.stringify({ name, allowedUserIds, reuseVolume: reuseVolume || undefined, appType, cuaEnabled, mode }),
     }),
   regenMachineId: (id: string) =>
     req(`/api/admin/instances/${id}/regen-machine-id`, { method: 'POST' }),

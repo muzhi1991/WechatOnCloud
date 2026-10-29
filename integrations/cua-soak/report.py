@@ -24,7 +24,8 @@ def summarize(rows, interval=300):
             reasons.append('registration-not-ready')
         if not c.get('cuaHealth', {}).get('rpcOk'):
             reasons.append('health-rpc-unavailable')
-        if not all(c.get('desktopProcesses', {}).get(p) for p in ('wechat', 'cua-spacesd', 'Xvnc')):
+        expected = row.get('requiredProcesses', ['wechat', 'cua-spacesd', 'Xvnc'])
+        if not expected or not all(c.get('desktopProcesses', {}).get(p) for p in expected):
             reasons.append('desktop-process-missing')
         control_state = c.get('control', {}).get('state', 'unknown')
         states[control_state] += 1

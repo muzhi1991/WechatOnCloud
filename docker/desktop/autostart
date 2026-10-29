@@ -1,0 +1,3 @@
+#!/bin/sh
+# Independent desktop entry point. No WOC app definitions or primary-app loop.
+exec /woc/desktop/session

@@ -1,3 +1,4 @@
+import { instanceMode, instanceImage, assertDesktopImage } from './desktop.js';
 import { withMaintenance, lifecycleEnabled, journal, assertInputCurrent } from './lifecycle/operations.js';
 import { createWriteStream, mkdirSync, statfsSync, statSync as fileStatSync, createReadStream, openSync, fsyncSync, closeSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -510,8 +511,11 @@ function driDeviceGids(devices: string[]): string[] {
   return Array.from(gids);
 }
 
+const configuredImage = (inst: Instance) => instanceImage(inst, WECHAT_IMAGE, cuaConfig?.image);
+
 function envList(inst: Instance): string[] {
   const env = [
+    `WOC_INSTANCE_MODE=${instanceMode(inst)}`,
     `PUID=${PUID}`,
     `PGID=${PGID}`,
     `TZ=${TZ}`,
@@ -521,12 +525,13 @@ function envList(inst: Instance): string[] {
   // baseimage 仅检查该变量是否「已设置」（值无关），设上即不再给 Xvnc 加 -hw3d。
   if (!ENABLE_GPU) env.push('DISABLE_DRI=1');
   // 透传 os 伪装开关给容器内的 00-woc-identity 钩子（决定是否把 /etc/os-release 改成 deepin）。
-  env.push(`WOC_SPOOF_OS=${SPOOF_OS ? '1' : '0'}`);
+  env.push(`WOC_SPOOF_OS=${instanceMode(inst) === 'app' && SPOOF_OS ? '1' : '0'}`);
   // v1.2.0 多应用：透传应用类型给 02-woc-app 钩子（写入 /config/.woc-app，autostart 据此启动）。
   // 老实例无 appType → instanceAppType 回退 wechat；自定义应用额外透传启动命令。
   const appType = instanceAppType(inst);
-  env.push(`WOC_APP_TYPE=${appType}`);
-  if (appType === 'custom' && inst.customLaunch) env.push(`WOC_CUSTOM_LAUNCH=${inst.customLaunch}`);
+  if (instanceMode(inst) === 'app') env.push(`WOC_APP_TYPE=${appType}`);
+  if (instanceMode(inst) === 'desktop') env.push('WOC_RESTORE_MINIMIZED=0');
+  if (instanceMode(inst) !== 'desktop' && appType === 'custom' && inst.customLaunch) env.push(`WOC_CUSTOM_LAUNCH=${inst.customLaunch}`);
   // 深色模式：作为新实例启动时的初始明暗下发给 autostart（autostart 据此设 portal color-scheme，
   // 微信等 Chromium 系应用即跟随系统深色）。开关由面板顶栏主题统一控制、持久化在 accounts.json，
   // 运行中的实例则通过 setInstanceDark 实时切换（见下）。
@@ -776,7 +781,8 @@ function withLifecycle<T>(instId: string, fn: () => Promise<T>): Promise<T> {
 function rawRunInstance(inst: Instance, opts?: { keepImage?: boolean; image?: string; reason?: string; force?: boolean; repair?: boolean }): Promise<void> {
   return withLifecycle(inst.id, async () => {
     if (lifecycleEnabled && inst.cuaEnabled && !opts?.keepImage && await instanceRuntime(inst) !== 'missing') {
-      await docker.getImage(opts?.image || cuaConfig!.image).inspect();
+      const target = await docker.getImage(opts?.image || configuredImage(inst)).inspect();
+      assertDesktopImage(inst, target.Config?.Labels || {});
       await createManagedBackup(inst);
     }
     await runInstanceNow(inst, opts);
@@ -787,7 +793,7 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean; imag
   const existing = docker.getContainer(inst.containerName);
   const info: any = await existing.inspect().catch((e: any) => { if (e.statusCode === 404) return null; throw e; });
   const imageOverride: string | undefined = opts?.keepImage && info?.Image ? String(info.Image) : undefined;
-  const image = opts?.image || imageOverride || (inst.cuaEnabled ? cuaConfig?.image : WECHAT_IMAGE);
+  const image = opts?.image || imageOverride || configuredImage(inst);
   if (!image) throw new Error('Cua integration is not configured');
   // 沿用旧镜像重建时无需 ensureImage（镜像 id 一定在本地——容器刚在用它）；
   // 也避免"离线 + 本地无 :latest"时连重启都失败。
@@ -800,7 +806,8 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean; imag
     if (process.env.WOC_CONTROL_ENABLED === '1' && imageInfo.Config?.Labels?.['io.woc.cua.control'] !== '1') throw new Error('Managed control requires the P3 desktop image');
     if (lifecycleEnabled && imageInfo.Config?.Labels?.['io.woc.cua.lifecycle'] !== '1') throw new Error('Managed lifecycle requires a P4-compatible desktop image');
     if (!imageInfo.Config?.Labels?.['io.woc.cua.version']) throw new Error('Selected image does not include WOC Cua integration');
-  } else if (!imageOverride) await ensureImage(inst.id);
+  } else if (!imageOverride && instanceMode(inst) !== 'desktop') await ensureImage(inst.id);
+  assertDesktopImage(inst, (await docker.getImage(image).inspect()).Config?.Labels || {});
   const occupied = inst.cuaEnabled ? new Set((await docker.listContainers({ all: true }))
     .filter(c => process.env.WOC_CONTROL_ENABLED !== '1' || !c.Names.includes('/' + process.env.WOC_PANEL_CONTAINER))
     .flatMap(c => c.Ports.map(p => p.PublicPort).filter((p): p is number => !!p))) : new Set<number>();
@@ -853,13 +860,13 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean; imag
     console.log(`[docker] 实例 ${inst.id} 挂载 GPU 渲染设备: ${dris.join(', ')}`);
   }
   // 伪装成真实有线网卡 MAC（厂商 OUI），替代容器默认的本地管理位 MAC。
-  const mac = realisticMac(inst.id);
+  const mac = instanceMode(inst) === 'app' ? realisticMac(inst.id) : undefined;
   const createOpts: Docker.ContainerCreateOptions = {
     name: inst.containerName,
     Image: image,
     // 内部 hostname 伪装成"个人电脑"名（不再用 woc-wx-<hex>，那是容器/服务器特征）。
     // 反代靠容器名 name 寻址，与此 hostname 无关。
-    Hostname: realisticHostname(inst.id),
+    Hostname: instanceMode(inst) === 'desktop' ? `desktop-${inst.id}` : realisticHostname(inst.id),
     Env: [...envList(inst), ...(cua?.env || ['WOC_CUA_ENABLED=0'])],
     Labels: cua?.labels,
     ExposedPorts: { '3000/tcp': {}, ...(cua ? { '3211/tcp': {} } : {}) },
@@ -867,8 +874,8 @@ async function runInstanceNow(inst: Instance, opts?: { keepImage?: boolean; imag
   };
   // 自定义网络时，MAC 须写到对应 endpoint 上（新版 docker 弃用顶层 MacAddress）；默认网络则用顶层。
   if (net) {
-    createOpts.NetworkingConfig = { EndpointsConfig: { [net]: { MacAddress: mac } as any } };
-  } else {
+    createOpts.NetworkingConfig = { EndpointsConfig: { [net]: mac ? { MacAddress: mac } as any : {} } };
+  } else if (mac) {
     (createOpts as any).MacAddress = mac;
   }
   const container = await docker.createContainer(createOpts).catch((e) => {
@@ -918,9 +925,9 @@ async function rawEnsureRunning(inst: Instance): Promise<void> {
 // skipPull：批量升级时由调用方先统一拉取一次，避免 N 个实例拉 N 次（受限网络下每次
 // 都要等到拉取停滞超时，表现为"一键升级卡死"）。
 async function rawUpgradeInstance(inst: Instance, opts?: { skipPull?: boolean }): Promise<void> {
-  if (inst.cuaEnabled) {
+  if (inst.cuaEnabled || instanceMode(inst) === 'desktop') {
     const wasStopped = (await instanceRuntime(inst)) === 'stopped';
-    await runInstance(inst); // Only WOC_CUA_IMAGE; never the upstream updater's fallback.
+    await runInstance(inst); // Select the pinned image for this mode; never the upstream fallback.
     if (wasStopped) await stopInstance(inst);
     return;
   }
@@ -1247,7 +1254,7 @@ export async function latestInstanceImageId(): Promise<string | null> {
 // 实例是否「镜像落后」：其运行中容器的镜像 Id 与本地最新镜像不一致（即重建就会换新镜像）。
 // 容器不存在 / 查不到最新镜像时返回 false（不打扰）。传入 latestId 复用一次查询，避免 N 次 inspect。
 export async function instanceOutdated(inst: Instance, latestId: string | null): Promise<boolean> {
-  if (inst.cuaEnabled) latestId = cuaConfig ? await docker.getImage(cuaConfig.image).inspect().then(i => i.Id).catch(() => null) : null;
+  if (inst.cuaEnabled || instanceMode(inst) === 'desktop') latestId = await docker.getImage(configuredImage(inst)).inspect().then(i => i.Id).catch(() => null);
   if (!latestId) return false;
   try {
     const info: any = await docker.getContainer(inst.containerName).inspect();
@@ -1450,6 +1457,7 @@ async function execCapture(inst: Instance, cmd: string[], user = 'abc'): Promise
 // wechat-ctl.sh；telegram 等各自实现。兼容旧容器（升级前镜像里没有 /woc/app-ctl.sh）：有则用之，无则
 // 回退老的 wechat-ctl.sh（旧实例都是微信）。appType 取值受 instanceAppType 约束，可安全内插进 shell。
 export async function triggerWechat(inst: Instance, cmd: 'install' | 'update'): Promise<void> {
+  if (instanceMode(inst) === 'desktop') throw new Error('请通过桌面应用菜单管理各应用');
   const at = instanceAppType(inst);
   const action = cmd === 'update' ? 'update' : 'install';
   const run = async (wait: boolean) => {
@@ -1484,6 +1492,10 @@ export interface WechatStatus {
 const DEFAULT_STATUS: WechatStatus = { phase: 'idle', percent: 0, installed: false, version: '', message: '未安装', updatedAt: 0 };
 
 export async function wechatStatus(inst: Instance): Promise<WechatStatus> {
+  if (instanceMode(inst) === 'desktop') {
+    const ready = await execCapture(inst, ['sh', '-c', 'pgrep -u abc -x openbox >/dev/null && pgrep -u abc -x tint2 >/dev/null && pgrep -u abc -x xsettingsd >/dev/null']).then(() => true).catch(() => false);
+    return { ...DEFAULT_STATUS, installed: ready, phase: ready ? 'ready' : 'idle', message: ready ? '完整桌面已就绪' : '桌面未就绪' };
+  }
   try {
     // 兼容旧容器（无 /woc/app-ctl.sh）：有则按 appType 取状态，无则回退老的 wechat-ctl.sh（旧实例皆微信）。
     const at = instanceAppType(inst);

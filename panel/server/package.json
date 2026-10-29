@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "updater": "tsx src/updater-entry.ts",
     "test:control": "node --import tsx --test src/control/*.test.ts",
-    "test:lifecycle": "node --import tsx --test src/lifecycle/*.test.ts"
+    "test:lifecycle": "node --import tsx --test src/lifecycle/*.test.ts",
+    "test:desktop": "node --import tsx --test src/desktop.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^9.4.0",

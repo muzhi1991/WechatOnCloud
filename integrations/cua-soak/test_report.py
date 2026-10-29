@@ -4,6 +4,16 @@ from report import summarize
 
 
 class ReportTest(unittest.TestCase):
+    def test_desktop_profile_needs_its_shell_not_wechat(self):
+        row = {'at': '2026-10-29T02:00:00+00:00', 'errors': {},
+               'requiredProcesses': ['openbox', 'tint2', 'xsettingsd', 'cua-spacesd', 'Xvnc'],
+               'checks': {'registration': {'state': 'ready'}, 'cuaHealth': {'rpcOk': True},
+                          'control': {'state': 'idle'},
+                          'desktopProcesses': dict.fromkeys(['openbox', 'tint2', 'xsettingsd', 'cua-spacesd', 'Xvnc'], True)}}
+        self.assertEqual(summarize([row])['unhealthySamples'], [])
+        row['checks']['desktopProcesses']['tint2'] = False
+        self.assertIn('desktop-process-missing', summarize([row])['unhealthySamples'][0]['reasons'])
+
     def test_detects_gap_restart_and_failed_probe_without_calling_them_healthy(self):
         first = {'at': '2026-10-28T09:00:00+00:00', 'errors': {}, 'checks': {
             'registration': {'state': 'ready'}, 'cuaHealth': {'rpcOk': True},

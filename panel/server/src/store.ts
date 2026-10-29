@@ -1,3 +1,4 @@
+import { instanceMode, type InstanceMode } from './desktop.js';
 import { chmodSync, readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -41,6 +42,7 @@ export function instanceAppType(i: Instance): AppType {
 }
 
 export interface Instance {
+  mode?: InstanceMode; // Old records are app mode. Set only at creation.
   cuaEnabled?: boolean; // Opt-in only; existing instances remain unchanged.
   id: string; // 短 id，用于容器/卷命名
   name: string; // 显示名
@@ -258,6 +260,7 @@ function sanitizeInstanceIds(ids: string[]): string[] {
 export function publicInstance(i: Instance) {
   return {
     cuaEnabled: !!i.cuaEnabled,
+    mode: instanceMode(i),
     id: i.id,
     name: i.name,
     appType: instanceAppType(i), // 老实例无字段时回退 wechat
@@ -323,10 +326,10 @@ function parseIdFromVolume(volumeName: string): string | null {
 }
 
 // 名称留空时自动命名：「微信 1」「微信 2」……取第一个没被占用的编号
-function autoInstanceName(type: AppType): string {
+function autoInstanceName(type: AppType, mode: InstanceMode): string {
   const used = new Set(data.instances.map((i) => i.name));
   for (let n = 1; ; n++) {
-    const name = `${APP_LABELS[type]} ${n}`;
+    const name = `${mode === 'desktop' ? '完整桌面' : APP_LABELS[type]} ${n}`;
     if (!used.has(name)) return name;
   }
 }
@@ -338,6 +341,7 @@ export function createInstance(
   reuseVolumeName?: string,
   appType: AppType = 'wechat',
   cuaEnabled = false,
+  mode: InstanceMode = 'app',
 ) {
   const type: AppType = APP_TYPES.includes(appType) ? appType : 'wechat';
   let id = randomBytes(5).toString('hex'); // 10 hex chars
@@ -351,8 +355,9 @@ export function createInstance(
   }
   const inst: Instance = {
     cuaEnabled,
+    mode,
     id,
-    name: name.trim() || autoInstanceName(type),
+    name: name.trim() || autoInstanceName(type, mode),
     appType: type,
     containerName: `woc-wx-${id}`,
     volumeName,

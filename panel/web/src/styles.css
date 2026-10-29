@@ -2774,3 +2774,6 @@ button {
     animation-iteration-count: infinite !important;
   }
 }
+
+/* Full desktop uses local scaling; browser fullscreen does not mutate remote geometry. */
+.iv-stage--vnc:fullscreen { width: 100vw; height: 100vh; background: #172536; }

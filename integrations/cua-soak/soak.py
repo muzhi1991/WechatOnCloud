@@ -42,6 +42,8 @@ def request(url, token, payload=None, grpc=False):
 
 def sample(config):
     result = {'at': dt.datetime.now(dt.timezone.utc).isoformat(), 'checks': {}, 'errors': {}}
+    expected = config.get('requiredProcesses', ['wechat', 'cua-spacesd', 'Xvnc'])
+    result['requiredProcesses'] = expected
     def check(name, fn):
         try:
             value = fn()
@@ -62,7 +64,7 @@ def sample(config):
         'docker', 'stats', '--no-stream', '--format', '{{json .}}', *config['containers']]).splitlines()])
     def processes():
         names = {line.split()[-1] for line in command(['docker', 'top', config['desktopContainer'], '-eo', 'pid,comm']).splitlines() if line.split()}
-        return {name: name in names for name in ('wechat', 'cua-spacesd', 'Xvnc')}
+        return {name: name in names for name in expected}
     check('desktopProcesses', processes)
     def snapshot():
         s = request(config['panelUrl'] + '/api/integrations/cua/snapshot', Path(config['syncTokenFile']).read_text().strip())

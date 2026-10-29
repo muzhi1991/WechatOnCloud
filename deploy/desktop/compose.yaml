@@ -1,0 +1,56 @@
+name: woc-desktop-panel-d1
+services:
+  panel:
+    image: local/woc-panel:desktop-d1
+    container_name: woc-desktop-panel-d1
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 1g
+    memswap_limit: 1g
+    ports:
+      - "192.168.31.101:36084:8080"
+      - "192.168.31.101:13370-13389:13370-13389"
+    command:
+      - /bin/sh
+      - -ec
+      - 'export PANEL_ADMIN_PASSWORD="$$(cat /run/secrets/panel-admin-password)"; exec npm run start'
+    environment:
+      PANEL_ADMIN_USER: admin
+      PANEL_DATA: /data/panel/accounts.json
+      WOC_PANEL_CONTAINER: woc-desktop-panel-d1
+      WOC_INSTANCE_NETWORK: woc-desktop-d1-instances
+      WOC_WECHAT_IMAGE: sha256:a2bc099e7d89f01eb26e9b95748f49612bb94533a923cde09685621a62233d8d
+      WOC_DESKTOP_IMAGE: ${WOC_DESKTOP_IMAGE:?Set the verified desktop image ID}
+      WOC_CUA_ENABLED: "1"
+      WOC_CONTROL_ENABLED: "1"
+      WOC_LIFECYCLE_ENABLED: "1"
+      WOC_BACKUP_MAX_GIB: "10"
+      WOC_BACKUP_TOTAL_GIB: "20"
+      WOC_CUA_IMAGE: sha256:4a0b859c281fc097cc5e8d8c8b56f984e272963f41e8889eb78bbae4e0e1442a
+      WOC_CUA_BIND_IP: 192.168.31.101
+      WOC_CUA_PUBLIC_HOST: 192.168.31.101
+      WOC_CUA_NAMESPACE: woc-desktop
+      WOC_CUA_PORT_FIRST: "13370"
+      WOC_CUA_PORT_LAST: "13389"
+      WOC_CUA_HOST_SECRETS_DIR: /root/woc-desktop-test/deploy/desktop/secrets/instances
+      WOC_CUA_CPUS: "2"
+      WOC_INSTANCE_MEM_GB: "3"
+      WOC_WATCHDOG_INTERVAL_SEC: "0"
+      WOC_STUCK_HEAL: "0"
+      WOC_DISABLE_IMAGE_PRUNE: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - panel-data:/data/panel
+      - ./secrets/instances:/data/cua-secrets
+      - ./secrets/cua-sync-token:/run/secrets/cua-sync-token:ro
+      - ./secrets/cua-agent-token:/run/secrets/cua-agent-token:ro
+      - ./secrets/panel-admin-password:/run/secrets/panel-admin-password:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  panel-data:
+    name: woc-desktop-panel-d1-data
