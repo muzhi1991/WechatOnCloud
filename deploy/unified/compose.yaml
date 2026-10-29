@@ -1,0 +1,57 @@
+name: woc-cua-panel-p3
+services:
+  panel:
+    image: ${WOC_UNIFIED_PANEL_IMAGE:?Set the verified unified panel image ID}
+    container_name: woc-cua-panel-p3
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 1g
+    memswap_limit: 1g
+    ports:
+      - "192.168.31.101:36083:8080"
+      - "192.168.31.101:13340-13359:13340-13359"
+    command:
+      - /bin/sh
+      - -ec
+      - 'export PANEL_ADMIN_PASSWORD="$$(cat /run/secrets/panel-admin-password)"; exec npm run start'
+    environment:
+      PANEL_ADMIN_USER: admin
+      PANEL_DATA: /data/panel/accounts.json
+      WOC_PANEL_CONTAINER: woc-cua-panel-p3
+      WOC_INSTANCE_NETWORK: woc-cua-p3-instances
+      WOC_WECHAT_IMAGE: sha256:a2bc099e7d89f01eb26e9b95748f49612bb94533a923cde09685621a62233d8d
+      WOC_DESKTOP_IMAGE: sha256:ce67703372b350bd63a9642a52e78a3daff2b34e752f588ec29656557c7e4f05
+      WOC_CUA_ENABLED: "1"
+      WOC_CONTROL_ENABLED: "1"
+      WOC_LIFECYCLE_ENABLED: "1"
+      WOC_BACKUP_MAX_GIB: "10"
+      WOC_BACKUP_TOTAL_GIB: "20"
+      WOC_CUA_IMAGE: sha256:4a0b859c281fc097cc5e8d8c8b56f984e272963f41e8889eb78bbae4e0e1442a
+      WOC_CUA_BIND_IP: 192.168.31.101
+      WOC_CUA_PUBLIC_HOST: 192.168.31.101
+      WOC_CUA_NAMESPACE: woc-p3
+      WOC_CUA_PORT_FIRST: "13340"
+      WOC_CUA_PORT_LAST: "13359"
+      WOC_CUA_HOST_SECRETS_DIR: /root/woc-cua-control/deploy/cua-control/secrets/instances
+      WOC_CUA_CPUS: "2"
+      WOC_INSTANCE_MEM_GB: "3"
+      WOC_WATCHDOG_INTERVAL_SEC: "0"
+      WOC_STUCK_HEAL: "0"
+      WOC_DISABLE_IMAGE_PRUNE: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - panel-data:/data/panel
+      - /root/woc-cua-control/deploy/cua-control/secrets/instances:/data/cua-secrets
+      - /root/woc-cua-control/deploy/cua-control/secrets/cua-sync-token:/run/secrets/cua-sync-token:ro
+      - /root/woc-cua-control/deploy/cua-control/secrets/cua-agent-token:/run/secrets/cua-agent-token:ro
+      - /root/woc-cua-control/deploy/cua-control/secrets/panel-admin-password:/run/secrets/panel-admin-password:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  panel-data:
+    name: woc-cua-panel-p3-data
+    external: true
