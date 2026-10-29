@@ -38,3 +38,11 @@ DriverService 的 effect 仍可能为 unverifiable；消息发送通过画面与
 首个正式样本：两个容器 running、restartCount 0、OOM false；WeChat/Cua/Xvnc 进程存在；注册 ready/generation 1，Health RPC 成功，控制 idle，无采样错误。这个初始结果不能作为过夜通过证据。采样与次日复核命令见 [只读观察说明](../../integrations/cua-soak/README.md)。
 
 后续扩展仅完成方案，尚未实现数据库查询、持续消息监听、自动回复、完整桌面增强或 AI 对话面板。
+
+## 次日检查与原生直连（2026-10-29）
+
+09:00 前的稳定性检查覆盖 187 个样本、15.50 小时（10-28 17:22 至 10-29 08:52，Asia/Shanghai）：无探测错误、异常样本或采样间断，P5 与面板的容器身份各保持唯一，控制状态始终 idle。次日新截图确认微信仍登录且可操作。36 小时观察任务继续运行，这只是过夜阶段检查，尚非完整 36 小时验收。
+
+按用户要求增加不经过 WOC 租约的原生 Cua Spaces 入口 **P5微信直连**。宿主 raw TCP 代理加 Mac SSH 隧道连接 P5 已有的 spacesd；未重建或重启容器。Health、匿名拒绝、原生 H264 WebSocket 视频均通过。解锁 Mac 后，实际打开原生独立窗口，在微信搜索框点击、输入 `CUAinputtest` 并观察到文字；随后清除文字，确认原界面恢复，没有发送新消息。
+
+前后对比 8 个受保护容器，ID 和 StartedAt 全部相同。原 WOC 管理功能及受管注册保留。直连不参与控制权互斥；此轮没有实现完整桌面模式，也没有访问数据库。部署、复验及回滚见 [直连说明](../../deploy/cua-direct/README.md)。

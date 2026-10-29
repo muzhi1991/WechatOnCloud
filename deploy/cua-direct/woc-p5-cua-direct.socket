@@ -1,0 +1,11 @@
+[Unit]
+Description=P5 WeChat Cua direct TCP entry (bypasses WOC leases)
+After=network-online.target
+Wants=network-online.target
+
+[Socket]
+ListenStream=192.168.31.101:13361
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

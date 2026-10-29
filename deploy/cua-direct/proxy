@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+# The socket is inherited from systemd; forward raw TCP (HTTP/2 + WebSocket).
+# Resolve only the named instance on the expected Docker network.
+address=$(/usr/bin/docker inspect --format '{{(index .NetworkSettings.Networks "woc-cua-p3-instances").IPAddress}}' woc-wx-77bafd5161)
+case "$address" in
+  ''|*[!0-9.]*) echo 'Target container has no valid IPv4 address' >&2; exit 1 ;;
+esac
+exec /usr/lib/systemd/systemd-socket-proxyd --connections-max=64 --exit-idle-time=60s "$address:3211"
