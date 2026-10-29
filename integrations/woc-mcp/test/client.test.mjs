@@ -18,6 +18,8 @@ test('real MCP SDK client: tools, resources, live update, unsubscribe, reconnect
     res.setHeader('content-type', 'application/json');
     if (req.headers.authorization !== 'Bearer ' + 'x'.repeat(48)) { res.writeHead(401); res.end('{}'); return; }
     if (req.url.includes('private')) { res.writeHead(404); res.end(JSON.stringify({ code: 'WOC_MACHINE_NOT_FOUND' })); return; }
+    if (req.url.endsWith('/ui_search')) { res.writeHead(409); res.end(JSON.stringify({ ok: false, code: 'WOC_WRONG_PAGE', execution: 'not_started', precondition: { page: 'contacts' } })); return; }
+    if (req.url.endsWith('/navigate')) { assert.equal(req.headers['x-woc-expected-epoch'], 'a'.repeat(36)); }
     let result = {};
     if (req.url.endsWith('/machines')) result = { machines: [{ id: 'test', name: 'Test' }] };
     if (req.url.endsWith('/revision')) { polls++; result = { revision }; }
@@ -46,6 +48,11 @@ test('real MCP SDK client: tools, resources, live update, unsubscribe, reconnect
     assert.equal(JSON.parse(response.content[0].text).sessions[0].unread, 2);
     const denied = await first.client.callTool({ name: 'woc_wechat_sessions', arguments: { machine_id: 'private' } });
     assert.equal(denied.isError, true);
+    const uiError = await first.client.callTool({ name: 'woc_wechat_ui_search', arguments: { machine_id: 'test', scope: 'contacts', query: 'Example' } });
+    assert.equal(uiError.isError, true);
+    assert.deepEqual(uiError.structuredContent.precondition, { page: 'contacts' });
+    assert.equal(JSON.parse(uiError.content[0].text).execution, 'not_started');
+    await first.client.callTool({ name: 'woc_wechat_navigate', arguments: { machine_id: 'test', page: 'contacts', lock_id: 'a'.repeat(36) } });
     await assert.rejects(first.client.subscribeResource({ uri: 'wechat://private/messages' }));
     assert.equal(polls, 0);
     await first.client.subscribeResource({ uri: 'wechat://test/messages' });

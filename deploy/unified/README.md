@@ -1,8 +1,10 @@
 # 统一控制台：原面板增加完整桌面
 
+当前组件、MCP/HTTP 调用链、按端口分流及 Mac 自动登记机制见 [系统架构](../../doc/dev/WOC-Cua-系统架构.md)。
+
 后续只读服务已接入同一控制台：见 [WOC read daemon 验收](../../doc/dev/WOC-read-daemon-acceptance.md)
-及[部署说明](../read-daemon/README.md)。当前面板使用 `local/woc-panel:read-v2`；
-下文镜像为各阶段历史记录。现有微信容器未重建，仅新增内部只读服务。
+及[部署说明](../read-daemon/README.md)。当前面板使用 `local/woc-panel:wechat-ui-v2`（微信 UI 原子接口）；
+下文镜像为各阶段历史记录。现有微信容器未重建，内部服务现支持可选 UI 原子操作。当前部署详见 [UI 验收](../../doc/dev/WOC-WeChat-UI-验收.md)。
 
 2026-10-29，按用户要求停止独立 D1 测试部署，在原 36083 面板新建桌面验证。不迁移 D1 实例、凭证或登记，不引入跨部署接管逻辑。
 
@@ -77,3 +79,15 @@ ssh root@192.168.31.101 'python3 /root/woc-cua-control/soak-unified/report.py /r
 面板升级只重建面板容器。微信、浏览器、完整桌面及原 `cua-worker-01` 的容器 ID/StartedAt 前后一致。真实 UI 输入仅在完整桌面 `dfde788ec9`；未操作微信消息。此轮升级发生在只读稳定采样期间，后续检查应区分计划内面板更新与实例异常，不把本次更新期间的样本当作连续无变更过夜验收。
 
 接入与边界见 [WOC MCP](../../integrations/woc-mcp/README.md)，验收证据见 [原生兼容与写锁验收](../../doc/dev/Cua-原生兼容与写锁验收.md)。回滚旧面板时，同时恢复 Mac 的 `config.before-client-v3.json` 并重新启动原同步任务，重新登记旧只读凭证；只退服务端镜像而保留新客户端凭证会导致认证失败。旧镜像配置保存在服务器 `.env.before-lock-v3`，不回滚微信/桌面数据卷。
+
+## 2026-10-30 微信 UI 原子接口
+
+当前 `.env` 固定面板镜像为
+`sha256:1713435394a4edef84369e166d338df7548f1349e1a455a27c18178aa0e34f26`
+（`local/woc-panel:wechat-ui-v2`）。仍使用本文同一 Compose 目录、面板和三个
+Cua 端口；没有增加控制台。微信容器内仅更新并重启 `woc-read`，启用可选微信
+UI 适配。账号、微信进程和现有实例容器均未重启。
+
+新建/重建实例可使用包含模块的 `local/woc-cua:read-ui-v2`，但需单独配置
+账号、读取服务和 `ui.enabled`；不会默认启用自动操作。当前原实例未切换镜像。
+详细接口、部署记录及局部回滚见 [UI 首版验收](../../doc/dev/WOC-WeChat-UI-验收.md)。

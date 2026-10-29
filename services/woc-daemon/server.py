@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated, local-only wx-cli adapter. No GUI, key scans or consumer state."""
+"""Authenticated local wx-cli adapter and opt-in application UI provider."""
 import argparse
 import hashlib
 import hmac
@@ -88,6 +88,7 @@ def unread_flags(value):
 
 class Service:
     def __init__(self, binary, home, token_file, exports, timeout=90, ttl=3600, max_export=256 * 1024 * 1024):
+        self.ui = None
         self.binary, self.home = str(binary), Path(home)
         self.token_file, self.exports = Path(token_file), Path(exports)
         self.timeout, self.ttl, self.max_export = timeout, ttl, max_export
@@ -170,7 +171,8 @@ class Service:
         args = arguments(op, body)
         self.config()
         if op == "health":
-            return {"ready": True, "version": 1, "capabilities": list(SCHEMA), "gui_writes": False}
+            return {"ready": True, "version": 2, "capabilities": list(SCHEMA), "gui_writes": self.ui is not None,
+                    "apps": {"wechat": {"ui": self.ui is not None}}}
         if op == "revision":
             return self.revision()
         if not self.gate.acquire(blocking=False):
@@ -236,6 +238,20 @@ def make_server(service, host="127.0.0.1", port=0):
         def dispatch(self):
             try:
                 principal = service.authenticate(self.headers)
+                if self.command == "POST" and re.fullmatch(r"/v1/apps/wechat/[a-z_]+", self.path):
+                    from ui_service import UIError, READS
+                    op = self.path.rsplit('/', 1)[1]
+                    if not service.ui:
+                        self.json(503, {"ok": False, "code": "WOC_UI_NOT_CONFIGURED", "error": "WeChat UI provider is not configured", "execution": "not_started"}); return
+                    if op not in READS and not re.fullmatch(r'[a-f0-9-]{36}', self.headers.get('X-WOC-Control-Epoch', '')):
+                        self.json(403, {"ok": False, "code": "WOC_GATEWAY_ADMISSION_REQUIRED", "error": "Managed gateway admission required", "execution": "not_started"}); return
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 16384 or self.headers.get("Transfer-Encoding"):
+                        raise Failure("WOC_INVALID_ARGUMENT", "Invalid UI request size", 413)
+                    try:
+                        result = service.ui.execute(op, json.loads(self.rfile.read(size)), principal)
+                    except UIError as e: result = e.result
+                    self.json(200 if result.get('ok') is not False else 409, result); return
                 if self.command == "GET" and re.fullmatch(r"/v1/files/[a-f0-9]{48}", self.path):
                     with service.download(self.path.rsplit("/", 1)[1], principal) as f:
                         self.send_response(200)
@@ -286,6 +302,9 @@ def main():
     config = json.loads(Path(args.config).read_text())
     service = Service(config["binary"], config["wx_home"], config["token_file"], config["exports"],
                       timeout=config.get("timeout_seconds", 90), ttl=config.get("export_ttl_seconds", 3600))
+    if config.get('ui', {}).get('enabled') is True:
+        from ui_service import UIService
+        service.ui = UIService(config['ui'], Path(config['wx_home']).parent / 'private/ui')
     server = make_server(service, config.get("host", "127.0.0.1"), config.get("port", 3212))
     def stop(*_):
         threading.Thread(target=server.shutdown, daemon=True).start()

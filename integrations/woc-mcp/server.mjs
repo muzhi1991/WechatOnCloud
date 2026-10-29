@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema,
   ReadResourceRequestSchema, SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { operations, schema } from '../../panel/server/src/business/contract.mjs';
+import { uiOperations, uiSchema } from '../../panel/server/src/business/ui-contract.mjs';
 
 const config = JSON.parse(readFileSync(process.argv[2] || process.env.WOC_CLIENT_CONFIG, 'utf8'));
 const base = new URL(config.panelUrl);
@@ -28,14 +29,21 @@ for (const [op, spec] of Object.entries(operations)) {
   tools.push({ name: `woc_wechat_${op}`, description: spec.description, inputSchema: schema(op, true),
     annotations: { readOnlyHint: op !== 'extract', destructiveHint: false, openWorldHint: false } });
 }
-async function call(path, args = {}) {
+for (const [op, spec] of Object.entries(uiOperations)) {
+  tools.push({ name: `woc_wechat_${op}`, description: spec.description, inputSchema: uiSchema(op, true),
+    annotations: { readOnlyHint: !!spec.read, destructiveHint: !spec.read, openWorldHint: !spec.read } });
+}
+class HttpFailure extends Error {
+  constructor(result) { super(`${result.code || 'WOC_REQUEST_FAILED'}: ${result.error || 'Request failed'}`); this.result = result; }
+}
+async function call(path, args = {}, extraHeaders = {}) {
   const token = readFileSync(config.tokenFile, 'utf8').trim();
   const response = await fetch(new URL(path, base), {
-    method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extraHeaders },
     body: JSON.stringify(args), signal: AbortSignal.timeout(110_000),
   });
   const result = await response.json();
-  if (!response.ok) throw Error(`${result.code || 'WOC_REQUEST_FAILED'}: ${result.error || 'Request failed'}`);
+  if (!response.ok) throw new HttpFailure(result);
   return result;
 }
 const machineId = value => {
@@ -61,6 +69,10 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
     if (Object.hasOwn(names, name)) {
       if (name !== 'woc_machines_list') machineId(args.machine_id);
       result = await call(`/api/integrations/woc/${names[name]}`, args);
+    } else if (name.startsWith('woc_wechat_') && Object.hasOwn(uiOperations, name.slice(11))) {
+      const { machine_id, lock_id, ...body } = args;
+      result = await call(`/api/integrations/wechat/${machineId(machine_id)}/${name.slice(11)}`, body,
+        lock_id ? { 'x-woc-expected-epoch': lock_id } : {});
     } else {
       const op = name.replace(/^woc_wechat_/, '');
       if (!name.startsWith('woc_wechat_') || op === 'revision' || !Object.hasOwn(operations, op)) throw Error('Unknown WOC tool');
@@ -73,6 +85,7 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
     }
     return { content: [{ type: 'text', text: JSON.stringify(result) }] };
   } catch (e) {
+    if (e instanceof HttpFailure) return { isError: true, content: [{ type: 'text', text: JSON.stringify(e.result) }], structuredContent: e.result };
     return { isError: true, content: [{ type: 'text', text: e instanceof Error ? e.message : 'WOC request failed' }] };
   }
 });

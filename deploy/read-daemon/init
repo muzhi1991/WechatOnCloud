@@ -8,6 +8,13 @@ cat /opt/woc-read/server.py > "$woc_read_temp"
 chmod 700 "$woc_read_temp"
 chown abc:abc "$woc_read_temp"
 mv -f "$woc_read_temp" /config/woc-read/server.py
+for woc_read_module in ui_service.py wechat_ui.py; do
+  if [ -f "/opt/woc-read/$woc_read_module" ]; then
+    cp "/opt/woc-read/$woc_read_module" "/config/woc-read/$woc_read_module"
+    chmod 600 "/config/woc-read/$woc_read_module"
+    chown abc:abc "/config/woc-read/$woc_read_module"
+  fi
+done
 mkdir -p /run/service/woc-read
 cat > /run/service/woc-read/run <<'RUN'
 #!/bin/sh

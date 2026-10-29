@@ -109,5 +109,24 @@ as unexecuted and must not be automatically retried.
   error (e.g. unsupported background input) is returned unchanged; WOC does
   not turn it into a claimed successful action.
 
-This version does not add message reading, monitoring, auto-replies, database
-access or the web AI conversation. Those remain separate design work.
+The daemon integration adds the read tools and resource notifications described
+above. Optional WeChat UI operations are now available in this same MCP process;
+see below. Auto-replies and the web AI conversation remain separate design work. See the [current architecture](../../doc/dev/WOC-Cua-系统架构.md)
+for the native Cua port routing, machine registration and container service boundaries.
+
+## WeChat UI operations
+
+The shared contract is `panel/server/src/business/ui-contract.mjs`. Seven tools
+use the prefix `woc_wechat_`: `ui_state`, `navigate`, `ui_search`, `open_item`,
+`fill_text`, `send_draft`, and `ui_request_status`. All accept `machine_id`.
+Only the two observations are lock-free. Writes check the existing client lock;
+an optional `lock_id` rejects calls from an earlier ownership period. The adapter
+never acquires a lock on behalf of a UI call. Prerequisite errors preserve the
+full JSON in both text and `structuredContent`, with MCP `isError`.
+
+Install/link [woc-wechat](../skills/woc-wechat/SKILL.md) for the fixed open-chat and
+send-text workflows. Its script explicitly acquires/releases the lock through the
+same authenticated HTTP API. It uses currently visible matches first, otherwise
+searches the appropriate page; it does not scroll through contact/session lists.
+Restart the local WOC MCP connection to refresh tool discovery after updating.
+See [UI acceptance and boundaries](../../doc/dev/WOC-WeChat-UI-验收.md).

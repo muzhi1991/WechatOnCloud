@@ -1,6 +1,6 @@
-# WOC read service
+# WOC data and application service
 
-The read service is independent of the application/desktop UI and `cua-spacesd`.
+The data-reading path is independent of the application/desktop UI and `cua-spacesd`.
 It calls the maintained wx-cli fork, never implements decryption itself, and never
 acquires/renews a GUI write lock. Existing Cua and KasmVNC control paths are unchanged.
 
@@ -43,7 +43,7 @@ exports and 256 MiB per exported file. Missing/unsupported local media preserves
 Each daemon permits one wx-cli query at a time; overlap returns `WOC_QUERY_BUSY`
 immediately, not a queued task or lock wait. This is a bounded worker guard unrelated
 to the desktop write lock. Query timeout is 90 seconds. No generic shell, init,
-key refresh, consumer cursor, or message-send interface is exposed.
+key refresh, consumer cursor, interface is exposed by the data-reading path. The optional UI API is separate below.
 
 ## MCP notifications
 
@@ -132,3 +132,38 @@ handles or download URLs. A notification can be deliberately triggered only agai
 the disposable snapshot via `WOC_TEST_SNAPSHOT_DB`, never by touching the original DB.
 Actual MCP notification reception and automatic model wakeup are separate claims;
 this service implements the former and provides no model scheduler.
+
+## Optional WeChat UI adapter
+
+Set `ui.enabled: true` explicitly in the private daemon configuration. Defaults
+remain false. `ui.display` and `ui.bus` select the existing X display and AT-SPI
+bus (see config.example.json). The adapter requires the desktop user's accessible
+WeChat process, Python dbus, xdotool, xclip and the existing WOC input fence. It
+does not launch/restart WeChat, inject code, or read process memory.
+
+Package `server.py`, `ui_service.py`, and `wechat_ui.py` together in `/opt/woc-read`
+and the persistent `/config/woc-read` copy. The updated installer and initializer
+handle these files. Only restart the `woc-read` s6 service for a code update; there
+is no need to restart the account or container. The optional image layer packages
+the modules but never embeds an account, credential or enabled private config.
+
+UI requests share `/api/integrations/wechat/:machine/:operation` and the same
+internal daemon port 3212. The gateway checks the existing GUI write lock before
+forwarding mutations with its trusted admission epoch. The daemon never calls
+back, acquires a lock or fixes a missing prerequisite. Client scripts orchestrate.
+Do not expose the internal daemon port or its service credential to clients.
+
+`ui_state` and `ui_request_status` are observations. `navigate`, `ui_search`,
+`open_item`, `fill_text`, and `send_draft` are writes. Each local UI worker is
+bounded to five seconds and serialized without a waiting queue. The input fence
+drains an admitted operation before control handover; it is not another GUI
+ownership lock. UI references are caller-bound and expire after 60 seconds.
+
+Send receipts live in `private/ui/requests.sqlite` (0600). They survive service
+restart, retain up to 1024 entries for seven days, and distinguish known
+non-execution from partial/unknown results. Preserve this file during maintenance
+to keep duplicate protection. A receipt records local execution, not delivery.
+Same request ID with changed arguments is rejected. No automatic send retries.
+
+See [UI acceptance](../../doc/dev/WOC-WeChat-UI-验收.md) for page coverage, current
+image digests, actual sends and rollback.

@@ -14,6 +14,7 @@ import { reviewManagedMaintenance, createManagedBackup, managedBackupStream, rol
 import { watchdogDecision } from './lifecycle/watchdog.js';
 import { registerClientControlRoutes } from './control/client-routes.js';
 import { registerReadRoutes } from './business/routes.js';
+import { registerUiRoutes } from './business/ui-routes.js';
 import { registerAgentControlRoutes } from './control/routes.js';
 import { managed, ensureControl, leases, requestActor, requestEpoch, humanActor, humanWrite, vncAuthorization, trackControlSocket, startControlGateways } from './control/runtime.js';
 import { cuaConfig, watchdogInterval } from './cua/config.js';
@@ -260,6 +261,10 @@ registerReadRoutes(app, {
 registerClientControlRoutes(app, {
   leases,
   machines: () => listInstances().filter(i => managed(i)).map(i => ({ id: i.id, name: i.name, endpoint: cuaRegistry?.get(i.id)?.endpoint || '' })),
+  ensure: async id => { const inst = findInstance(id); if (!inst || !managed(inst)) throw new Error('Unavailable'); await ensureControl(inst); },
+});
+registerUiRoutes(app, {
+  exists: id => !!findInstance(id), leases,
   ensure: async id => { const inst = findInstance(id); if (!inst || !managed(inst)) throw new Error('Unavailable'); await ensureControl(inst); },
 });
 

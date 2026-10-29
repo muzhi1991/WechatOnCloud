@@ -6,5 +6,6 @@
   "token_file": "/config/woc-read/private/service.token",
   "exports": "/config/woc-read/exports",
   "timeout_seconds": 90,
-  "export_ttl_seconds": 3600
+  "export_ttl_seconds": 3600,
+  "ui": {"enabled": false, "display": ":1", "bus": "unix:path=/config/.XDG/at-spi/bus_1"}
 }
