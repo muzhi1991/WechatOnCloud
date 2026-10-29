@@ -4,6 +4,13 @@ The native `cua-spaces` skill, `cua mcp`, CLI and `cua-spacesd` remain unchanged
 WOC supplies a separate stdio MCP and skill. Stable credentials identify a client;
 the panel owns the lock. Ordinary Cua GUI requests carry no new lock parameter.
 
+The adapter also provides optional `woc_wechat_*` read tools and standard resource
+subscriptions for configured machines. Run `npm ci --ignore-scripts` in this
+directory after updating; the launch command and client credential stay unchanged.
+See [read service](../../deploy/read-daemon/README.md) for query arguments, local
+media downloads, subscription semantics and deployment. Queries never acquire or
+renew the desktop lock. Resource notifications do not automatically wake a model.
+
 ## Server identity configuration
 
 Set `WOC_CLIENTS_FILE` to a private JSON file mounted read-only into the panel:

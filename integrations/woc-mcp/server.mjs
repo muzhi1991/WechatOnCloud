@@ -1,7 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { createInterface } from 'node:readline';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema,
+  ReadResourceRequestSchema, SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { operations, schema } from '../../panel/server/src/business/contract.mjs';
 
 const config = JSON.parse(readFileSync(process.argv[2] || process.env.WOC_CLIENT_CONFIG, 'utf8'));
+const base = new URL(config.panelUrl);
+if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password) throw Error('Invalid panel URL');
+const pollMs = config.notificationIntervalMs ?? 5000;
+if (!Number.isInteger(pollMs) || pollMs < 1000 || pollMs > 300000) throw Error('notificationIntervalMs must be 1000..300000');
 const names = { woc_machines_list: 'machines', woc_lock_status: 'status', woc_lock_acquire: 'acquire', woc_lock_release: 'release' };
 const descriptions = {
   woc_machines_list: 'List WOC machines accessible to this authenticated client, with original Cua endpoints.',
@@ -15,36 +23,95 @@ const tools = Object.keys(names).map(name => ({ name, description: descriptions[
   }, required: name === 'woc_machines_list' ? [] : name === 'woc_lock_release' ? ['machine_id', 'lock_id'] : ['machine_id'], additionalProperties: false },
   annotations: { readOnlyHint: ['woc_machines_list', 'woc_lock_status'].includes(name), destructiveHint: false, openWorldHint: false },
 }));
-async function dispatch(request) {
-  switch (request.method) {
-    case 'initialize': return { protocolVersion: request.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'woc-control', version: '0.1.0' } };
-    case 'ping': return {};
-    case 'tools/list': return { tools };
-    case 'tools/call': {
-      const name = request.params?.name, args = request.params?.arguments || {};
-      if (!Object.hasOwn(names, name)) throw new Error('Unknown WOC tool');
-      if (name !== 'woc_machines_list' && typeof args.machine_id !== 'string') throw new Error('machine_id is required');
-      const token = readFileSync(config.tokenFile, 'utf8').trim();
-      const response = await fetch(`${config.panelUrl.replace(/\/$/, '')}/api/integrations/woc/${names[name]}`, {
-        method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify(args), signal: AbortSignal.timeout(30_000),
-      });
-      const result = await response.json();
-      return { isError: !response.ok, content: [{ type: 'text', text: JSON.stringify(result) }] };
+for (const [op, spec] of Object.entries(operations)) {
+  if (op === 'revision') continue;
+  tools.push({ name: `woc_wechat_${op}`, description: spec.description, inputSchema: schema(op, true),
+    annotations: { readOnlyHint: op !== 'extract', destructiveHint: false, openWorldHint: false } });
+}
+async function call(path, args = {}) {
+  const token = readFileSync(config.tokenFile, 'utf8').trim();
+  const response = await fetch(new URL(path, base), {
+    method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(args), signal: AbortSignal.timeout(110_000),
+  });
+  const result = await response.json();
+  if (!response.ok) throw Error(`${result.code || 'WOC_REQUEST_FAILED'}: ${result.error || 'Request failed'}`);
+  return result;
+}
+const machineId = value => {
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw Error('Invalid machine_id');
+  return value;
+};
+const query = (id, op, args = {}) => call(`/api/integrations/wechat/${machineId(id)}/${op}`, args);
+const uriFor = id => `wechat://${machineId(id)}/messages`;
+const parseUri = uri => {
+  const match = /^wechat:\/\/([a-zA-Z0-9_-]{1,128})\/messages$/.exec(uri);
+  if (!match) throw Error('Unsupported resource URI');
+  return match[1];
+};
+const server = new Server({ name: 'woc-control', version: '0.2.0' }, {
+  capabilities: { tools: {}, resources: { subscribe: true } },
+  instructions: 'WeChat queries use local checkpoint data, can lag the GUI, and never acquire a GUI write lock. Resource notifications are change hints, not guaranteed per-message delivery or automatic model wakeups. Re-query after reconnect and maintain your own processing progress.',
+});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+server.setRequestHandler(CallToolRequestSchema, async request => {
+  try {
+    const name = request.params.name, args = request.params.arguments || {};
+    let result;
+    if (Object.hasOwn(names, name)) {
+      if (name !== 'woc_machines_list') machineId(args.machine_id);
+      result = await call(`/api/integrations/woc/${names[name]}`, args);
+    } else {
+      const op = name.replace(/^woc_wechat_/, '');
+      if (!name.startsWith('woc_wechat_') || op === 'revision' || !Object.hasOwn(operations, op)) throw Error('Unknown WOC tool');
+      const { machine_id, ...body } = args;
+      result = await query(machine_id, op, body);
+      if (op === 'extract' && result.download_url) {
+        result.download_url = new URL(result.download_url, base).href;
+        result.download_auth = 'Use the same WOC client Bearer credential; never include it in the URL or a model prompt.';
+      }
     }
-    default: throw new Error('Unknown MCP method');
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+  } catch (e) {
+    return { isError: true, content: [{ type: 'text', text: e instanceof Error ? e.message : 'WOC request failed' }] };
   }
-}
-const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-for await (const line of input) {
-  let request;
-  try { request = JSON.parse(line); } catch { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON' } }) + '\n'); continue; }
-  if (request.id === undefined) continue;
-  try { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: await dispatch(request) }) + '\n'); }
-  catch (e) {
-    const message = e instanceof Error ? e.message : 'WOC request failed';
-    const output = request.method === 'tools/call' ? { result: { isError: true, content: [{ type: 'text', text: message }] } }
-      : { error: { code: -32601, message } };
-    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, ...output }) + '\n');
-  }
-}
+});
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  const result = await call('/api/integrations/woc/machines');
+  return { resources: result.machines.map(m => ({ uri: uriFor(m.id), name: `${m.name}: WeChat messages`,
+    description: 'Recent conversations. Subscribe for local database change hints; not all machines have a configured read service.', mimeType: 'application/json' })) };
+});
+server.setRequestHandler(ReadResourceRequestSchema, async request => ({ contents: [{ uri: request.params.uri,
+  mimeType: 'application/json', text: JSON.stringify(await query(parseUri(request.params.uri), 'sessions', { limit: 20 })) }] }));
+// Only ephemeral per-connection revisions. No event sequence, queue or consumer offsets.
+const subscriptions = new Map();
+server.setRequestHandler(SubscribeRequestSchema, async request => {
+  const uri = request.params.uri, id = parseUri(uri);
+  if (subscriptions.size >= 64 && !subscriptions.has(uri)) throw Error('Subscription limit reached');
+  const revision = await query(id, 'revision');
+  subscriptions.set(uri, { id, revision: revision.revision });
+  return {};
+});
+server.setRequestHandler(UnsubscribeRequestSchema, async request => { subscriptions.delete(request.params.uri); return {}; });
+let checking = false;
+const timer = setInterval(async () => {
+  if (checking) return;
+  checking = true;
+  try {
+    for (const [uri, entry] of subscriptions) {
+      try {
+        const current = await query(entry.id, 'revision');
+        if (subscriptions.get(uri) !== entry) continue;
+        if (current.revision !== entry.revision) {
+          await server.sendResourceUpdated({ uri });
+          entry.revision = current.revision;
+        }
+      } catch (error) {
+        if (/WOC_UNAUTHORIZED|WOC_MACHINE_NOT_FOUND/.test(String(error))) subscriptions.delete(uri);
+      }
+    }
+  } finally { checking = false; }
+}, pollMs);
+timer.unref();
+server.onclose = () => { clearInterval(timer); subscriptions.clear(); };
+await server.connect(new StdioServerTransport());

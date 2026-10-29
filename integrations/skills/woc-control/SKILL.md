@@ -16,4 +16,21 @@ Use `woc_machines_list` to map a machine ID to its original Cua endpoint. Use th
 
 The Cua and WOC connections must be configured for the same authenticated client. A shared Cua credential is one client: run its GUI tasks serially. Do not supply another client ID or change credentials to bypass a lock.
 
-Remote coding-agent and process/command APIs retain native behavior in this version; these calls neither acquire nor renew nor release the desktop lock. Do not use this exception to bypass a rejected GUI action. Message monitoring and business operations are not provided by this skill yet.
+Remote coding-agent and process/command APIs retain native behavior in this version; these calls neither acquire nor renew nor release the desktop lock. Do not use this exception to bypass a rejected GUI action.
+
+Configured machines expose `woc_wechat_health`, `sessions`, `unread`, `contacts`,
+`groups`, `members`, `history`, `search`, `attachments` and `extract` (all with the
+`woc_wechat_` prefix). These read local data and never need a GUI write lock. Prefer
+exact chat usernames from contacts/groups; query recent N messages and maintain
+your own processing progress. WeChat unread counts are conversation-level, not
+agent acknowledgments. Preserve checkpoint/freshness and missing-key warnings.
+
+`extract` only exports locally available attachments and returns an authenticated,
+temporary download URL. Use the same client credential through a trusted downloader;
+never print credentials or put them into URLs. Missing media does not authorize UI
+clicks, external downloads or key scans. Unsupported sticker cache remains unsupported.
+
+Clients supporting MCP resources may subscribe to `wechat://MACHINE_ID/messages`.
+An update is a hint to re-query, not an individual message or a model wakeup. There
+is no offline replay; re-query after reconnect. A busy local query returns immediately
+and may be retried later without taking any desktop lock.

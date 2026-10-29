@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+# Opt-in: a normal desktop without WeChat/configuration starts no read service.
+test -f /config/woc-read/config.json || exit 0
+woc_read_temp=$(mktemp /config/woc-read/.server.XXXXXX)
+trap 'rm -f "$woc_read_temp"' EXIT
+cat /opt/woc-read/server.py > "$woc_read_temp"
+chmod 700 "$woc_read_temp"
+chown abc:abc "$woc_read_temp"
+mv -f "$woc_read_temp" /config/woc-read/server.py
+mkdir -p /run/service/woc-read
+cat > /run/service/woc-read/run <<'RUN'
+#!/bin/sh
+umask 077
+export WX_IMAGE_KVCOMM_DIR="${WX_IMAGE_KVCOMM_DIR:-/config/woc-read/private/image-kvcomm}"
+exec s6-setuidgid abc python3 /config/woc-read/server.py --config /config/woc-read/config.json
+RUN
+chmod 755 /run/service/woc-read/run
+s6-svscanctl -a /run/service

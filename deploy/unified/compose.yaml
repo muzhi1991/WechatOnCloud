@@ -24,6 +24,7 @@ services:
       WOC_CUA_ENABLED: "1"
       WOC_CONTROL_ENABLED: "1"
       WOC_CLIENTS_FILE: /run/secrets/woc-clients.json
+      WOC_READ_TARGETS_FILE: /run/secrets/woc-read/targets.json
       WOC_LIFECYCLE_ENABLED: "1"
       WOC_BACKUP_MAX_GIB: "10"
       WOC_BACKUP_TOTAL_GIB: "20"
@@ -43,6 +44,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/woc-cua-control/deploy/cua-control/secrets/woc-clients.json:/run/secrets/woc-clients.json:ro
+      - /root/woc-cua-control/deploy/read-daemon/secrets:/run/secrets/woc-read:ro
       - panel-data:/data/panel
       - /root/woc-cua-control/deploy/cua-control/secrets/instances:/data/cua-secrets
       - /root/woc-cua-control/deploy/cua-control/secrets/cua-sync-token:/run/secrets/cua-sync-token:ro

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Existing s6 service supervisor handles startup/restart; daemon never touches GUI.
+umask 077
+export WX_IMAGE_KVCOMM_DIR="${WX_IMAGE_KVCOMM_DIR:-/config/woc-read/private/image-kvcomm}"
+exec s6-setuidgid abc python3 /config/woc-read/server.py --config /config/woc-read/config.json

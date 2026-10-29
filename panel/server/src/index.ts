@@ -13,6 +13,7 @@ import { lifecycleEnabled, journal, maintenanceState } from './lifecycle/operati
 import { reviewManagedMaintenance, createManagedBackup, managedBackupStream, rollbackManagedImage, restoreManagedBackup } from './docker.js';
 import { watchdogDecision } from './lifecycle/watchdog.js';
 import { registerClientControlRoutes } from './control/client-routes.js';
+import { registerReadRoutes } from './business/routes.js';
 import { registerAgentControlRoutes } from './control/routes.js';
 import { managed, ensureControl, leases, requestActor, requestEpoch, humanActor, humanWrite, vncAuthorization, trackControlSocket, startControlGateways } from './control/runtime.js';
 import { cuaConfig, watchdogInterval } from './cua/config.js';
@@ -249,6 +250,13 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
 }
 registerCuaRoutes(app, (req, reply) => !!requireAdmin(req, reply));
 registerAgentControlRoutes(app);
+registerReadRoutes(app, {
+  exists: id => !!findInstance(id),
+  webActor: (req, id) => {
+    const user = currentUser(req);
+    return user && userCanAccess(user, id) ? user.id : undefined;
+  },
+});
 registerClientControlRoutes(app, {
   leases,
   machines: () => listInstances().filter(i => managed(i)).map(i => ({ id: i.id, name: i.name, endpoint: cuaRegistry?.get(i.id)?.endpoint || '' })),

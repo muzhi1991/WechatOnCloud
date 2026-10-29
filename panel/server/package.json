@@ -9,7 +9,8 @@
     "updater": "tsx src/updater-entry.ts",
     "test:control": "node --import tsx --test src/control/*.test.ts",
     "test:lifecycle": "node --import tsx --test src/lifecycle/*.test.ts",
-    "test:desktop": "node --import tsx --test src/desktop.test.ts"
+    "test:desktop": "node --import tsx --test src/desktop.test.ts",
+    "test:read": "node --import tsx --test src/business/*.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^9.4.0",

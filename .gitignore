@@ -151,3 +151,5 @@ dist
 /deploy/cua-control/secrets/
 
 /deploy/desktop/secrets/
+/deploy/read-daemon/secrets/
+__pycache__/

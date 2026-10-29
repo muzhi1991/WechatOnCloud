@@ -1,0 +1,10 @@
+{
+  "host": "0.0.0.0",
+  "port": 3212,
+  "binary": "/config/woc-read/bin/wx",
+  "wx_home": "/config/woc-read/wx-home",
+  "token_file": "/config/woc-read/private/service.token",
+  "exports": "/config/woc-read/exports",
+  "timeout_seconds": 90,
+  "export_ttl_seconds": 3600
+}
