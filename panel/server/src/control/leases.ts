@@ -14,11 +14,11 @@ export interface ControlObserver {
   result?(action: string, ok: boolean): void;
 }
 export class ControlError extends Error {
-  constructor(message: string, readonly statusCode = 409) { super(message); }
+  constructor(message: string, readonly statusCode = 409, readonly code?: string) { super(message); }
 }
 type Entry = {
   generation: number; epoch: string; state: 'idle' | 'human' | 'agent' | 'handover' | 'faulted';
-  owner?: Actor; token?: string; password?: string; expires: number; inflight: number;
+  idleManaged: boolean; expiredOwner?: string; owner?: Actor; token?: string; password?: string; expires: number; inflight: number;
   uncertain: boolean; initialized: boolean; retired: boolean; adapter: ControlAdapter; transition?: Promise<void>; drain: Set<() => void>;
   lane: { tail: Promise<void> };
 };
@@ -28,14 +28,14 @@ type Entry = {
 export class ControlLeases {
   private entries = new Map<string, Entry>();
   private holds = new Map<string, string>();
-  constructor(private readonly now = Date.now, readonly ttlMs = 30_000, private observer: ControlObserver = {}) {}
+  constructor(private readonly now = Date.now, readonly ttlMs = 30_000, private observer: ControlObserver = {}, readonly idleMs = 120_000) {}
   async ensure(id: string, generation: number, adapter: ControlAdapter, replace = false, duringMaintenance = false) {
     if (this.holds.has(id) && !duringMaintenance) return;
     let e = this.entries.get(id);
     if (!replace && e?.generation === generation) { if (!e.initialized) await e.transition; return; }
     if (e) { const oldEpoch = e.epoch; e.retired = true; e.uncertain = true; e.owner = undefined; e.token = undefined; e.state = 'faulted'; e.epoch = randomUUID(); this.observer.end?.(id, oldEpoch, 'generation-changed'); }
     const lane = e?.lane || { tail: Promise.resolve() };
-    e = { generation, epoch: randomUUID(), state: 'handover', expires: 0, inflight: 0, uncertain: false, initialized: false, retired: false, adapter, drain: new Set(), lane };
+    e = { generation, epoch: randomUUID(), idleManaged: false, state: 'handover', expires: 0, inflight: 0, uncertain: false, initialized: false, retired: false, adapter, drain: new Set(), lane };
     this.entries.set(id, e);
     e.transition = this.initialize(e);
     await e.transition;
@@ -65,7 +65,7 @@ export class ControlLeases {
     if (this.holds.has(id)) return { managed: true, state: 'maintenance', epoch: '', generation: this.entries.get(id)?.generation || 0,
       free: false, mine: false, holder: null, kind: null, expiresAt: 0, inflight: this.entries.get(id)?.inflight || 0, pending: true, reason: this.holds.get(id) };
     const e = this.get(id);
-    if (e.owner && this.now() >= e.expires) this.begin(e, undefined, 'expired');
+    if (e.owner && this.now() >= e.expires && !(e.idleManaged && e.inflight)) this.begin(e, undefined, 'expired');
     return { managed: true, state: e.state, epoch: e.epoch, generation: e.generation,
       free: e.state === 'idle', mine: this.same(e.owner, actor), holder: e.owner?.label || null,
       kind: e.owner?.kind || null, expiresAt: e.expires, inflight: e.inflight, pending: e.state === 'handover' };
@@ -73,6 +73,7 @@ export class ControlLeases {
   private begin(e: Entry, next?: Actor, reason = next ? 'taken-over' : 'interrupted') {
     const id = [...this.entries].find(([, value]) => value === e)?.[0];
     const previousEpoch = e.epoch;
+    if (reason === 'expired') e.expiredOwner = e.owner?.id;
     // Invalidate synchronously, before ANY await: no new old-epoch action enters.
     e.epoch = randomUUID(); e.owner = undefined; e.token = undefined; e.password = undefined;
     e.expires = 0; e.state = 'handover';
@@ -94,20 +95,22 @@ export class ControlLeases {
         });
         if (e.retired) return;
         if (next && id) this.observer.grant?.(id, next, e.epoch, e.generation);
+        if (next?.id === e.expiredOwner) e.expiredOwner = undefined;
         e.owner = next; e.state = next?.kind || 'idle';
         e.token = next?.kind === 'agent' ? randomBytes(32).toString('hex') : undefined;
-        e.expires = next ? this.now() + this.ttlMs : 0;
+        e.expires = next ? this.now() + (e.idleManaged ? this.idleMs : this.ttlMs) : 0;
       } catch { e.state = 'faulted'; e.uncertain = true; e.owner = undefined; e.token = undefined; }
     })();
   }
-  async take(id: string, actor: Actor, force = false): Promise<ReturnType<ControlLeases['status']> & { token?: string }> {
+  async take(id: string, actor: Actor, force = false, idleManaged = false): Promise<ReturnType<ControlLeases['status']> & { token?: string }> {
     this.assertNotHeld(id);
     const e = this.get(id); this.status(id);
-    if (e.state === 'faulted') throw new ControlError('输入状态不确定，请管理员恢复控制服务');
+    if (e.state === 'faulted') throw new ControlError('输入状态不确定，请管理员恢复控制服务', 409, 'WOC_CONTROL_BLOCKED');
     if (e.state === 'handover') return this.status(id, actor);
-    if (this.same(e.owner, actor)) { e.expires = this.now() + this.ttlMs; return this.grant(id, actor); }
-    if (e.owner && !force) throw new ControlError('桌面已有操作者，请等待其交回控制');
+    if (this.same(e.owner, actor)) { if (!e.idleManaged) e.expires = this.now() + this.ttlMs; return this.grant(id, actor); }
+    if (e.owner && !force) throw new ControlError('桌面已有操作者，请等待其交回控制', 409, 'WOC_LOCK_BUSY');
     if (force && actor.kind !== 'human') throw new ControlError('Agent 不能抢占人工控制');
+    e.idleManaged = idleManaged;
     this.begin(e, actor);
     // Long in-flight actions keep handover pending; never claim premature success.
     let timer: NodeJS.Timeout | undefined;
@@ -134,6 +137,17 @@ export class ControlLeases {
     if (!token || e.state !== 'agent' || e.token !== token || !e.owner) throw new ControlError('需要有效的 Agent 控制租约', 403);
     return { actor: e.owner, epoch: e.epoch };
   }
+  client(id: string, actor: Actor): { actor: Actor; epoch: string } {
+    const e = this.entries.get(id);
+    if (this.holds.has(id)) throw new ControlError('Control unavailable', 409, 'WOC_CONTROL_BLOCKED');
+    if (!e) throw new ControlError('Acquire the lock to prepare desktop control', 409, 'WOC_LOCK_REQUIRED');
+    this.status(id);
+    if (e.state === 'agent' && this.same(e.owner, actor)) return { actor, epoch: e.epoch };
+    const code = e.expiredOwner === actor.id ? 'WOC_LOCK_EXPIRED'
+      : e.owner ? 'WOC_LOCK_BUSY' : ['faulted', 'handover'].includes(e.state) ? 'WOC_CONTROL_BLOCKED' : 'WOC_LOCK_REQUIRED';
+    throw new ControlError('GUI write requires this client to hold the lock', 409, code);
+  }
+  initialized(id: string) { return this.entries.has(id); }
   humanPassword(id: string, actor: Actor, epoch: string) {
     const e = this.check(id, actor, epoch);
     if (actor.kind !== 'human' || !e.password) throw new ControlError('只读桌面');
@@ -143,9 +157,11 @@ export class ControlLeases {
     const e = this.check(id, actor, epoch);
     if (e.inflight) throw new ControlError('上一操作尚未结束');
     const record = this.observer.action?.(id, actor, epoch, name);
+    if (e.idleManaged) e.expires = this.now() + this.idleMs;
     e.inflight++;
     try {
       const result = await action(() => { if (e.retired) throw new ControlError('原操作已中断，不能向新的桌面继续输入'); });
+      if (e.idleManaged && e.epoch === epoch && this.same(e.owner, actor)) e.expires = this.now() + this.idleMs;
       if (record) this.observer.result?.(record, true);
       return result;
     }
@@ -174,7 +190,7 @@ export class ControlLeases {
     await this.ensure(id, old.generation, old.adapter, true);
     return this.status(id);
   }
-  private assertNotHeld(id: string) { if (this.holds.has(id)) throw new ControlError('实例维护中，暂停接受输入'); }
+  private assertNotHeld(id: string) { if (this.holds.has(id)) throw new ControlError('实例维护中，暂停接受输入', 409, 'WOC_CONTROL_BLOCKED'); }
   busy(id: string) {
     if (this.holds.has(id)) return true;
     if (!this.entries.has(id)) return false;

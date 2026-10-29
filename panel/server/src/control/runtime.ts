@@ -11,12 +11,14 @@ import { createControlGateway } from './gateway.js';
 import { lifecycleEnabled, journal, maintenanceState, configureMaintenance, withInputContext, withMaintenance } from '../lifecycle/operations.js';
 
 export const controlEnabled = process.env.WOC_CONTROL_ENABLED === '1';
+const idleMs = Number(process.env.WOC_CONTROL_IDLE_MS || 120_000);
+if (!Number.isFinite(idleMs) || idleMs < 1000 || idleMs > 3_600_000) throw new Error('WOC_CONTROL_IDLE_MS must be 1000..3600000');
 export const leases = new ControlLeases(Date.now, 30_000, {
   grant: (id, actor, epoch, generation) => { if (actor.kind === 'agent') journal?.start(id, 'task', actor.label, { epoch, details: { generation } }); },
   end: (id, epoch, reason) => journal?.endTask(id, epoch, reason),
   action: (id, actor, epoch, name) => journal?.start(id, 'action', name, { epoch, parent: journal.task(id, epoch), details: { actor: actor.kind } }),
   result: (action, ok) => journal?.finish(action, ok ? 'done' : 'uncertain', ok ? undefined : 'inspect-before-retry'),
-});
+}, idleMs);
 export const derived = (id: string, purpose: string) => createHmac('sha256', cuaRegistry!.token(id)).update(purpose).digest('hex');
 export const viewToken = (id: string) => derived(id, 'woc-cua-view-v1');
 export const managed = (inst?: Instance) => controlEnabled && !!inst?.cuaEnabled;

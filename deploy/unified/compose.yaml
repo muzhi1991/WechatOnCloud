@@ -23,6 +23,7 @@ services:
       WOC_DESKTOP_IMAGE: sha256:ce67703372b350bd63a9642a52e78a3daff2b34e752f588ec29656557c7e4f05
       WOC_CUA_ENABLED: "1"
       WOC_CONTROL_ENABLED: "1"
+      WOC_CLIENTS_FILE: /run/secrets/woc-clients.json
       WOC_LIFECYCLE_ENABLED: "1"
       WOC_BACKUP_MAX_GIB: "10"
       WOC_BACKUP_TOTAL_GIB: "20"
@@ -41,6 +42,7 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /root/woc-cua-control/deploy/cua-control/secrets/woc-clients.json:/run/secrets/woc-clients.json:ro
       - panel-data:/data/panel
       - /root/woc-cua-control/deploy/cua-control/secrets/instances:/data/cua-secrets
       - /root/woc-cua-control/deploy/cua-control/secrets/cua-sync-token:/run/secrets/cua-sync-token:ro

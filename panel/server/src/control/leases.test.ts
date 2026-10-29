@@ -81,3 +81,29 @@ test('a durable journal failure revokes ownership before reporting the fault', a
   assert.throws(() => l.agent('a', grant.token!), /有效/);
   await assert.rejects(l.write('a', agent, grant.epoch, async () => {}), /失效/);
 });
+
+test('stable client lock: queries and repeated acquire do not renew; writes do; expiry cannot revive', async () => {
+  let now = 1000;
+  const { adapter } = fixture(); const l = new ControlLeases(() => now, 30, {}, 120);
+  await l.ensure('a', 1, adapter); const a = await l.take('a', agent, false, true);
+  assert.equal(a.expiresAt, 1120);
+  now = 1050; assert.equal(l.status('a', agent).expiresAt, 1120);
+  assert.equal((await l.take('a', agent, false, true)).expiresAt, 1120);
+  assert.throws(() => l.client('a', { ...agent, id: 'another' }), e => (e as any).code === 'WOC_LOCK_BUSY');
+  const owner = l.client('a', agent); await l.write('a', owner.actor, owner.epoch, async () => { now = 1060; });
+  assert.equal(l.status('a').expiresAt, 1180);
+  now = 1181; assert.throws(() => l.client('a', agent), e => (e as any).code === 'WOC_LOCK_EXPIRED');
+  await new Promise(r => setImmediate(r));
+  const b = await l.take('a', agent, false, true);
+  await assert.rejects(l.release('a', agent, a.epoch));
+  assert.equal(l.status('a', agent).mine, true);
+  await l.release('a', agent, b.epoch); assert.equal(l.status('a').free, true);
+});
+test('idle timeout does not hand off an in-flight write; completion starts a new idle interval', async () => {
+  let now = 0; const { adapter } = fixture(); const l = new ControlLeases(() => now, 30, {}, 120);
+  await l.ensure('a', 1, adapter); const a = await l.take('a', agent, false, true);
+  let done!: () => void; const writing = l.write('a', agent, a.epoch, () => new Promise<void>(r => done = r));
+  now = 200; l.tick(); assert.equal(l.status('a', agent).mine, true);
+  await assert.rejects(l.take('a', { ...agent, id: 'other' }, false, true));
+  done(); await writing; assert.equal(l.status('a').expiresAt, 320);
+});

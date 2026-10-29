@@ -1,3 +1,4 @@
+import { configuredClient, clientCanAccess } from '../control/clients.js';
 import { desktopImage } from '../desktop.js';
 import { managed, viewToken } from '../control/runtime.js';
 import { readFileSync } from 'node:fs';
@@ -17,6 +18,8 @@ export function registerCuaRoutes(app: FastifyInstance, admin: (req: FastifyRequ
   const machine = (req: FastifyRequest, reply: FastifyReply) => {
     reply.header('cache-control', 'no-store');
     if (!cuaConfig || !cuaRegistry) { reply.code(503).send({ error: 'Cua disabled' }); return false; }
+    const client = configuredClient(req.headers.authorization?.replace(/^Bearer /, '') || '');
+    if (client) return true;
     let expected: string;
     try { expected = readFileSync(cuaConfig.serviceTokenFile, 'utf8').trim(); }
     catch { reply.code(503).send({ error: 'Sync credential unavailable' }); return false; }
@@ -29,17 +32,19 @@ export function registerCuaRoutes(app: FastifyInstance, admin: (req: FastifyRequ
   };
   app.get('/api/integrations/cua/snapshot', async (req, reply) => {
     if (!machine(req, reply)) return;
+    const supplied = req.headers.authorization?.replace(/^Bearer /, '') || '';
+    const client = configuredClient(supplied);
     const registry = cuaRegistry!;
     const revision = registry.revision;
     const instances = new Map(listInstances().map(i => [i.id, i]));
-    const records = await Promise.all(registry.records().map(async record => {
+    const records = await Promise.all(registry.records().filter(record => !client || clientCanAccess(client, record.id)).map(async record => {
       const { secretRef: _secretRef, incarnation: _incarnation, desired: _desired, ...publicRecord } = record;
       if (record.desired === 'deleted') return { ...publicRecord, state: 'deleted' };
       const inst = instances.get(record.id);
       if (!inst?.cuaEnabled) return { ...publicRecord, state: 'orphaned' };
       const { state } = await cuaInstanceStatus(inst);
       try {
-        return { ...publicRecord, state, ...(state === 'ready' ? { token: managed(inst) ? viewToken(record.id) : registry.token(record.id) } : {}) };
+        return { ...publicRecord, state, ...(state === 'ready' ? { token: managed(inst) ? (client ? supplied : viewToken(record.id)) : registry.token(record.id) } : {}) };
       } catch { return { ...publicRecord, state: 'error' }; }
     }));
     if (registry.revision !== revision) return reply.code(409).send({ error: 'Snapshot changed; retry' });
@@ -52,6 +57,8 @@ export function registerCuaRoutes(app: FastifyInstance, admin: (req: FastifyRequ
         !['registered', 'error'].includes(body?.status) || typeof body?.id !== 'string') {
       return reply.code(400).send({ error: 'Invalid acknowledgement' });
     }
+    const client = configuredClient(req.headers.authorization?.replace(/^Bearer /, '') || '');
+    if (client && !clientCanAccess(client, body.id)) return reply.code(404).send({ error: 'Machine unavailable' });
     if (!cuaRegistry!.ack(body.id, body.generation, body.status)) return reply.code(409).send({ error: 'Stale generation' });
     return { ok: true };
   });

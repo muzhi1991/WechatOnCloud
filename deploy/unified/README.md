@@ -62,3 +62,14 @@ ssh root@192.168.31.101 'python3 /root/woc-cua-control/soak-unified/report.py /r
 更新前停面板后备份到服务器私有目录 `/root/woc-cua-control/unified-backup-20261029/`，含面板数据（包括已有备份）、秘密文件与旧面板 image ID。它不包含微信消息卷的额外抓取。本次只有这一份约 567 MiB 以内的管理配置/备份副本，没有新增周期备份任务。
 
 回滚先停止统一面板和新桌面，保存更新后的面板状态，再恢复此前的面板数据、旧镜像和 lifecycle compose；旧微信/浏览器实例不重建、不回滚其数据卷。保留新桌面卷和登记状态，避免下一次创建误复用已分配端口。回滚属于管理状态恢复，不应同时重新启动 D1 面板。稳定验收后再按需清理私有快照与退休卷。
+
+
+## 2026-10-29 原生 Cua 与 WOC 写锁接入
+
+当前面板镜像更新为 `sha256:f989a4fdff00379ac16be778e0a3d5b8d33ecd3cba05666fc8926c3b2dd37176`（`dev-lock-v3`）。上文旧镜像为统一桌面交付时的历史记录。仍只有 36083 这一套控制台，没有重新启动 D1 面板。
+
+新增只读挂载 `WOC_CLIENTS_FILE=/run/secrets/woc-clients.json`，其中仅存客户端 token 的 SHA-256 与机器范围。Mac 私有身份位于 `~/.local/share/woc-client-v3/`；原 P3 Master 的 `serviceTokenFile` 改为该稳定凭证，三个原登记的地址/名称不变。WOC MCP 与原生 Cua 通过该凭证对应同一个写锁身份，原 Cua 源码和 skill 未修改。
+
+面板升级只重建面板容器。微信、浏览器、完整桌面及原 `cua-worker-01` 的容器 ID/StartedAt 前后一致。真实 UI 输入仅在完整桌面 `dfde788ec9`；未操作微信消息。此轮升级发生在只读稳定采样期间，后续检查应区分计划内面板更新与实例异常，不把本次更新期间的样本当作连续无变更过夜验收。
+
+接入与边界见 [WOC MCP](../../integrations/woc-mcp/README.md)，验收证据见 [原生兼容与写锁验收](../../doc/dev/Cua-原生兼容与写锁验收.md)。回滚旧面板时，同时恢复 Mac 的 `config.before-client-v3.json` 并重新启动原同步任务，重新登记旧只读凭证；只退服务端镜像而保留新客户端凭证会导致认证失败。旧镜像配置保存在服务器 `.env.before-lock-v3`，不回滚微信/桌面数据卷。

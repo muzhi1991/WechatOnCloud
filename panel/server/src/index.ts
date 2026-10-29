@@ -12,6 +12,7 @@ import type { Socket } from 'node:net';
 import { lifecycleEnabled, journal, maintenanceState } from './lifecycle/operations.js';
 import { reviewManagedMaintenance, createManagedBackup, managedBackupStream, rollbackManagedImage, restoreManagedBackup } from './docker.js';
 import { watchdogDecision } from './lifecycle/watchdog.js';
+import { registerClientControlRoutes } from './control/client-routes.js';
 import { registerAgentControlRoutes } from './control/routes.js';
 import { managed, ensureControl, leases, requestActor, requestEpoch, humanActor, humanWrite, vncAuthorization, trackControlSocket, startControlGateways } from './control/runtime.js';
 import { cuaConfig, watchdogInterval } from './cua/config.js';
@@ -248,6 +249,11 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
 }
 registerCuaRoutes(app, (req, reply) => !!requireAdmin(req, reply));
 registerAgentControlRoutes(app);
+registerClientControlRoutes(app, {
+  leases,
+  machines: () => listInstances().filter(i => managed(i)).map(i => ({ id: i.id, name: i.name, endpoint: cuaRegistry?.get(i.id)?.endpoint || '' })),
+  ensure: async id => { const inst = findInstance(id); if (!inst || !managed(inst)) throw new Error('Unavailable'); await ensureControl(inst); },
+});
 
 app.get('/api/instances/:id/activity', async (req, reply) => {
   const user = requireAuth(req, reply); if (!user) return;
