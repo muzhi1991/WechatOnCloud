@@ -1,21 +1,13 @@
-import { mkdirSync, readdirSync, statSync, rmSync, existsSync } from "node:fs";
+import { readdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { nextDue } from "./contracts.mjs";
 import { Paseo } from "./paseo.mjs";
-function directoryBytes(path, limit) {
-  let total = 0;
-  for (const item of readdirSync(path, { withFileTypes: true })) {
-    if (item.isSymbolicLink()) continue;
-    const p = join(path, item.name);
-    total += item.isDirectory() ? directoryBytes(p, limit - total) : statSync(p).size;
-    if (total > limit) break;
-  }
-  return total;
-}
+import { runScript } from "./runner.mjs";
+import { commandFor } from "./scripts.mjs";
+import { contextFor, resolve, stringify, output, tailText } from "./values.mjs";
 export class Engine {
   constructor(store, config, { paseo = new Paseo() } = {}) {
     this.store = store;
@@ -151,96 +143,99 @@ export class Engine {
     }
   }
   async execute(run, controller) {
-    const timeout = setTimeout(
-      () => controller.abort(Error("Action timed out")),
-      run.action.timeout_seconds * 1000,
-    );
-    let accepted = null,
-      log = "";
-    this.store.patch(run.id, run.action.type === "agent" ? "waiting" : "running");
+    const pipeline = run.action.type === "pipeline";
+    const actions = pipeline ? run.action.steps : [{ ...run.action, id: "action" }];
+    let log = "",
+      input = JSON.stringify(run.event),
+      receipt = null,
+      current;
+    const outputs = {},
+      results = [];
+    const persist = (status = "running") =>
+      this.store.patch(run.id, status, { log, result: { ...(receipt || {}), steps: results } });
+    persist();
     try {
-      let result;
-      if (run.action.type === "agent")
-        result = await this.paseo.execute(run.action, run.event, controller.signal, (r) => {
-          accepted = r;
-          this.store.patch(run.id, "running", { result: r });
-        });
-      else {
-        const state = join(this.config.stateDir, "scripts", run.trigger_id || "manual");
-        mkdirSync(state, { recursive: true, mode: 0o700 });
-        if (directoryBytes(state, 16 * 1024 * 1024) > 16 * 1024 * 1024)
-          throw Error("Script state exceeds 16 MiB; clean its state directory");
-        result = await new Promise((resolve, reject) => {
-          const child = spawn(run.action.command, run.action.args, {
-            cwd: run.action.cwd,
-            detached: true,
-            env: {
-              PATH: process.env.PATH,
-              HOME: process.env.HOME,
-              LANG: "C.UTF-8",
-              TZ: process.env.TZ || "Asia/Shanghai",
-              WOC_TRIGGER_URL: `http://127.0.0.1:${this.config.port}`,
-              WOC_TRIGGER_TOKEN_FILE: this.config.tokenFile,
-              WOC_TRIGGER_STATE_DIR: state,
-              WOC_CLIENT_CONFIG: this.config.wocClientConfig || "",
-              WOC_TRIGGER_CLI: new URL("./cli.mjs", import.meta.url).pathname,
-            },
-            stdio: ["pipe", "pipe", "pipe"],
-          });
-          const append = (d) => {
-            log = (log + d.toString()).slice(-65536);
-          };
-          child.stdout.on("data", append);
-          child.stderr.on("data", append);
-          child.stdin.on("error", () => {});
-          let killTimer;
-          const kill = () => {
-            if (!child.pid) return;
-            try {
-              process.kill(-child.pid, "SIGTERM");
-            } catch {}
-            killTimer = setTimeout(() => {
-              try {
-                process.kill(-child.pid, "SIGKILL");
-              } catch {}
-            }, 1000);
-            killTimer.unref();
-          };
-          const quota = setInterval(() => {
-            try {
-              if (directoryBytes(state, 16 * 1024 * 1024) > 16 * 1024 * 1024)
-                controller.abort(Error("Script state exceeds 16 MiB"));
-            } catch (e) {
-              controller.abort(e);
-            }
-          }, 1000);
-          controller.signal.addEventListener("abort", kill, { once: true });
-          if (controller.signal.aborted) kill();
-          child.on("error", reject);
-          child.on("close", (code, signal) => {
-            clearInterval(quota);
-            clearTimeout(killTimer);
-            // A script action owns its process group; do not leave detached children behind.
-            if (child.pid)
-              try {
-                process.kill(-child.pid, "SIGKILL");
-              } catch {}
-            controller.signal.removeEventListener("abort", kill);
-            if (controller.signal.aborted) reject(controller.signal.reason);
-            else if (code !== 0) reject(Error(`Script exited ${code ?? signal}`));
-            else resolve({ exit_code: code });
-          });
-          child.stdin.end(JSON.stringify(run.event));
-        });
+      for (const step of actions) {
+        controller.signal.throwIfAborted();
+        current = {
+          id: step.id,
+          type: step.type,
+          status: "running",
+          started: new Date().toISOString(),
+        };
+        results.push(current);
+        if (step.skip_empty && !input.trim()) {
+          current.status = "skipped";
+          outputs[step.id] = output("");
+          persist();
+          continue;
+        }
+        const context = contextFor(run, outputs, input);
+        const timeout = setTimeout(
+          () => controller.abort(Error(`Step ${step.id} timed out`)),
+          step.timeout_seconds * 1000,
+        );
+        try {
+          persist();
+          if (step.type === "agent") {
+            const a = {
+              ...step,
+              agent_id: stringify(resolve(step.agent_id, context)),
+              message: stringify(resolve(step.message, context)),
+            };
+            if (Buffer.byteLength(a.message) > 32768) throw Error("Agent message exceeds 32 KiB");
+            const event = pipeline
+              ? { ...run.event, run_id: run.id + ":" + step.id, data: context.input.json ?? input }
+              : run.event;
+            const result = await this.paseo.execute(a, event, controller.signal, (r) => {
+              receipt = r;
+              Object.assign(current, r);
+              persist();
+            });
+            const { text: reply, ...receiptResult } = result;
+            Object.assign(current, receiptResult);
+            input = reply ?? JSON.stringify(receiptResult);
+          } else {
+            const a = commandFor(this.config, step, context);
+            const result = await runScript(
+              this.config,
+              a,
+              run,
+              step.id,
+              input,
+              context,
+              controller.signal,
+              (d) => {
+                log = tailText(log + d);
+              },
+            );
+            input = result.text;
+            current.stderr = result.stderr;
+            current.exit_code = result.exit_code;
+            // Legacy logs retain stdout; pipeline output is a distinct, bounded result.
+            if (!pipeline) log = tailText(log + input);
+          }
+          if (Buffer.byteLength(input) > 262144) throw Error("Step output exceeds 256 KiB");
+          outputs[step.id] = output(input);
+          if (Buffer.byteLength(JSON.stringify(outputs)) > 524288)
+            throw Error("Combined step outputs exceed 512 KiB");
+          current.output = outputs[step.id];
+          current.status = "succeeded";
+          current.ended = new Date().toISOString();
+          persist();
+        } finally {
+          clearTimeout(timeout);
+        }
       }
-      this.store.patch(run.id, "succeeded", { log, result });
+      persist("succeeded");
     } catch (e) {
-      this.store.patch(run.id, accepted ? "unknown" : this.closed ? "interrupted" : "failed", {
-        log: log + "\n" + e.message,
-        result: accepted,
-      });
-    } finally {
-      clearTimeout(timeout);
+      if (current) {
+        current.status = receipt ? "unknown" : "failed";
+        current.error = e.message;
+        current.ended = new Date().toISOString();
+      }
+      log = tailText(log + "\n" + e.message);
+      persist(receipt ? "unknown" : this.closed ? "interrupted" : "failed");
     }
   }
   status() {

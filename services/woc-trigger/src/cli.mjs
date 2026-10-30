@@ -26,6 +26,12 @@ try {
   let result;
   if (cmd === "list") result = await call("GET", "/triggers");
   else if (cmd === "health") result = await call("GET", "/health");
+  else if (cmd === "catalog") result = await call("GET", "/catalog");
+  else if (["validate", "schedule-preview", "options"].includes(cmd)) {
+    result = await call("POST", "/" + cmd, JSON.parse(readFileSync(option("--file") || 0, "utf8")));
+  } else if (cmd === "discover") result = await call("POST", "/discover", { connection: id });
+  else if (cmd === "script-help") result = await call("POST", "/script-help", { script: id });
+  else if (cmd === "job") result = await call("GET", "/jobs/" + encodeURIComponent(id));
   else if (cmd === "agents") result = await call("GET", "/agents");
   else if (cmd === "create" || cmd === "update") {
     const input = JSON.parse(readFileSync(option("--file") || 0, "utf8"));
@@ -66,8 +72,21 @@ try {
     });
   } else
     throw Error(
-      "Commands: list, create --file, update ID --file, pause/resume/delete/run ID, runs [ID], log RUN_ID, agents, agent send --agent ID --message-file FILE [--key KEY]",
+      "Commands: catalog, discover CONNECTION, options/validate/schedule-preview --file FILE, script-help SCRIPT, job ID, list, create --file, update ID --file, pause/resume/delete/run ID, runs [ID], log RUN_ID, agents, agent send --agent ID --message-file FILE [--key KEY]",
     );
+  if (result?.job_id) {
+    const jobId = result.job_id;
+    for (let i = 0; i < 240; i++) {
+      result = await call("GET", "/jobs/" + jobId);
+      if (result.status === "failed") throw Error(result.error);
+      if (result.status === "succeeded") {
+        result = result.result;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (result.status === "running") throw Error("Discovery timed out; inspect job " + jobId);
+  }
   console.log(JSON.stringify(result, null, 2));
 } catch (e) {
   console.error(e.message);

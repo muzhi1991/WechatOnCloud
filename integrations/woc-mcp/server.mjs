@@ -91,8 +91,19 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
 });
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   const result = await call('/api/integrations/woc/machines');
-  return { resources: result.machines.map(m => ({ uri: uriFor(m.id), name: `${m.name}: WeChat messages`,
-    description: 'Recent conversations. Subscribe for local database change hints; not all machines have a configured read service.', mimeType: 'application/json' })) };
+  const ready = await Promise.all(result.machines.slice(0, 64).map(async m => {
+    try {
+      const token = readFileSync(config.tokenFile, 'utf8').trim();
+      const r = await fetch(new URL(`/api/integrations/wechat/${machineId(m.id)}/health`, base), {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: '{}', signal: AbortSignal.timeout(3000),
+      });
+      if (!r.ok) return null;
+      return { uri: uriFor(m.id), name: `${m.name}: WeChat messages`,
+        description: 'Local database change hint; query recent messages and deduplicate after notification.', mimeType: 'application/json' };
+    } catch { return null; }
+  }));
+  return { resources: ready.filter(Boolean) };
 });
 server.setRequestHandler(ReadResourceRequestSchema, async request => ({ contents: [{ uri: request.params.uri,
   mimeType: 'application/json', text: JSON.stringify(await query(parseUri(request.params.uri), 'sessions', { limit: 20 })) }] }));

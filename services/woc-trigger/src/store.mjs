@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { Failure, validate, nextDue } from "./contracts.mjs";
+import { tailText } from "./values.mjs";
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 export class Store {
   constructor(path, connections = {}) {
@@ -115,7 +116,15 @@ export class Store {
       .prepare(
         "INSERT INTO runs(id,trigger_id,name,status,event,action,created) VALUES(?,?,?,?,?,?,?)",
       )
-      .run(run, id, t.name, "queued", JSON.stringify(event), JSON.stringify(t.action), now);
+      .run(
+        run,
+        id,
+        t.name,
+        "queued",
+        JSON.stringify(event),
+        JSON.stringify(t.steps ? { type: "pipeline", steps: t.steps } : t.action),
+        now,
+      );
     return { run_id: run, status: "queued" };
   }
   enqueueAgent(action, key) {
@@ -151,7 +160,15 @@ export class Store {
         `SELECT id,trigger_id,name,status,created,started,ended,result FROM runs ${id ? "WHERE trigger_id=?" : ""} ORDER BY created DESC LIMIT 100`,
       )
       .all(...(id ? [id] : []))
-      .map((r) => ({ ...r, result: r.result ? JSON.parse(r.result) : null }));
+      .map((r) => {
+        const result = r.result ? JSON.parse(r.result) : null;
+        return {
+          ...r,
+          result: result
+            ? { ...result, steps: result.steps?.map(({ output, stderr, text, ...step }) => step) }
+            : null,
+        };
+      });
   }
   run(id) {
     const r = this.db.prepare("SELECT * FROM runs WHERE id=?").get(id);
@@ -173,7 +190,7 @@ export class Store {
         status,
         Date.now(),
         ["running", "waiting"].includes(status) ? null : Date.now(),
-        log.slice(-65536),
+        tailText(log),
         result ? JSON.stringify(result) : null,
         id,
       );

@@ -1,0 +1,56 @@
+{
+  "title": "读取微信新消息",
+  "description": "查询最近消息并去重；首次只建立基线。无新消息时输出为空。不会操作微信界面。",
+  "parameters": [
+    {
+      "name": "machine",
+      "label": "电脑",
+      "type": "string",
+      "required": true,
+      "provider": "machines",
+      "help": "选择运行微信且已配置数据读取的电脑。"
+    },
+    {
+      "name": "chat",
+      "label": "微信对话",
+      "type": "string",
+      "required": true,
+      "provider": "wechat.chats",
+      "depends_on": [
+        "machine"
+      ],
+      "help": "按最近会话、联系人或群聊查找；保存准确 username。"
+    },
+    {
+      "name": "sender",
+      "label": "关注的群成员",
+      "type": "string",
+      "provider": "wechat.members",
+      "depends_on": [
+        "machine",
+        "chat"
+      ],
+      "when": {
+        "field": "chat",
+        "ends_with": "@chatroom"
+      },
+      "help": "群聊必须选择一个成员，防止处理自身回复。私聊无需填写。",
+      "required": true
+    },
+    {
+      "name": "limit",
+      "label": "查询最近几条",
+      "type": "number",
+      "min": 1,
+      "max": 100,
+      "default": 50,
+      "help": "超过窗口的历史消息不会自动补齐。"
+    }
+  ],
+  "outputs": [
+    "batch_id",
+    "machine_id",
+    "chat",
+    "messages"
+  ]
+}

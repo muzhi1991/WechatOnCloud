@@ -1,5 +1,12 @@
 // One-time setup inside the trusted Agent container. Never prints credentials.
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  copyFileSync,
+} from "node:fs";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 const dir = "/state/automation";
 mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -48,3 +55,11 @@ const config = {
 if (!existsSync(dir + "/config.json"))
   writeFileSync(dir + "/config.json", JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
 console.log("Automation configuration and separate WOC identity ready");
+
+// Seed only missing examples. User scripts are never overwritten by startup.
+const scripts = "/workspace/woc/automation/scripts";
+mkdirSync(scripts, { recursive: true, mode: 0o700 });
+for (const name of readdirSync(new URL("../scripts/", import.meta.url))) {
+  if (!existsSync(scripts + "/" + name))
+    copyFileSync(new URL("../scripts/" + name, import.meta.url), scripts + "/" + name);
+}

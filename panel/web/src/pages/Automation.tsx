@@ -2,34 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useUI } from "../ui";
 import { useAuth } from "../auth";
-import { useInstances } from "../AppShell";
 import "./automation.css";
-import WechatArguments, { wechatDefaults, validateWechatArguments } from "./WechatArguments";
-type Trigger = {
-  id?: string;
-  name: string;
-  enabled: boolean;
-  source: {
-    type: string;
-    connection?: string;
-    uri?: string;
-    seconds?: number;
-    expression?: string;
-    timezone?: string;
-  };
-  action: {
-    type: string;
-    command?: string;
-    args?: string[];
-    cwd?: string;
-    agent_id?: string;
-    message?: string;
-    include_input?: boolean;
-    timeout_seconds: number;
-  };
-  next_run?: number;
-  webhook_secret?: string;
-};
+import AutomationEditor from "./AutomationEditor";
+import { request, newStep, type Trigger, type Agent, type Catalog } from "./automation-model";
 type Run = {
   id: string;
   trigger_id: string | null;
@@ -39,30 +14,25 @@ type Run = {
   started?: number;
   ended?: number;
   log?: string;
-  result?: { delivery?: string; agent_id?: string; completion?: string };
-};
-type Agent = { id: string; title: string; status: string; archived: boolean };
-const request = async <T,>(path: string, method = "GET", body?: unknown): Promise<T> => {
-  const r = await fetch("/api/automation/" + path, {
-    method,
-    headers: { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const v = await r.json();
-  if (!r.ok) throw Error(v.error || "请求失败");
-  return v;
+  result?: {
+    delivery?: string;
+    agent_id?: string;
+    completion?: string;
+    steps?: {
+      id: string;
+      status: string;
+      error?: string;
+      agent_id?: string;
+      output?: { text: string; json: unknown };
+      stderr?: string;
+    }[];
+  };
 };
 const fresh = (): Trigger => ({
   name: "",
   enabled: false,
   source: { type: "interval", seconds: 60 },
-  action: {
-    type: "script",
-    command: "python3",
-    args: [],
-    cwd: "/workspace/woc",
-    timeout_seconds: 300,
-  },
+  steps: [newStep()],
 });
 const time = (n?: number) => (n ? new Date(n).toLocaleString() : "—");
 const status: Record<string, string> = {
@@ -78,20 +48,21 @@ const status: Record<string, string> = {
 export default function Automation({ onOpenMenu }: { onOpenMenu: () => void }) {
   const { user } = useAuth(),
     { toast, confirm } = useUI(),
-    { instances } = useInstances(),
     [params] = useSearchParams();
   const [triggers, setTriggers] = useState<Trigger[]>([]),
     [runs, setRuns] = useState<Run[]>([]),
     [agents, setAgents] = useState<Agent[]>([]),
-    [connections, setConnections] = useState<string[]>([]);
+    [catalog, setCatalog] = useState<Catalog>({
+      connections: [],
+      scripts: [],
+      script_dir: "",
+      workspace: "/workspace/woc",
+    });
   const [draft, setDraft] = useState<Trigger | null>(null),
-    [args, setArgs] = useState("[]"),
     [error, setError] = useState(""),
-    [saving, setSaving] = useState(false),
     [secret, setSecret] = useState<{ id: string; value: string } | null>(null),
     [detail, setDetail] = useState<Run | null>(null),
     [filter, setFilter] = useState("");
-  const [template, setTemplate] = useState("");
   const [sourceHealth, setSourceHealth] = useState<
     { source: string[]; connected: boolean; error: string | null }[]
   >([]);
@@ -117,42 +88,28 @@ export default function Automation({ onOpenMenu }: { onOpenMenu: () => void }) {
     void request<{ agents: Agent[] }>("agents")
       .then((r) => setAgents(r.agents))
       .catch((e) => setError(e.message));
-    void request<{ connections: string[] }>("catalog")
-      .then((r) => setConnections(r.connections))
+    void request<Catalog>("catalog")
+      .then(setCatalog)
       .catch((e) => setError(e.message));
     return () => clearInterval(t);
   }, [refresh, user?.role]);
   const edit = (t: Trigger) => {
-    setTemplate("");
     setDraft(structuredClone(t));
-    setArgs(JSON.stringify(t.action.args || [], null, 2));
+    void request<Catalog>("catalog")
+      .then(setCatalog)
+      .catch((e) => toast(e.message, "error"));
   };
-  const save = async () => {
-    if (!draft) return;
-    setSaving(true);
-    try {
-      const next = {
-        ...draft,
-        action: {
-          ...draft.action,
-          ...(draft.action.type === "script" ? { args: JSON.parse(args) } : {}),
-        },
-      };
-      if (next.action.type === "script") validateWechatArguments(next.action.args);
-      const t = await request<Trigger>(
-        "triggers" + (draft.id ? "/" + draft.id : ""),
-        draft.id ? "PUT" : "POST",
-        next,
-      );
-      if (t.webhook_secret) setSecret({ id: t.id!, value: t.webhook_secret });
-      setDraft(null);
-      await refresh();
-      toast("已保存");
-    } catch (e) {
-      toast((e as Error).message, "error");
-    } finally {
-      setSaving(false);
-    }
+  const save = async (next: Trigger) => {
+    await request("validate", "POST", next);
+    const t = await request<Trigger>(
+      "triggers" + (next.id ? "/" + next.id : ""),
+      next.id ? "PUT" : "POST",
+      next,
+    );
+    if (t.webhook_secret) setSecret({ id: t.id!, value: t.webhook_secret });
+    setDraft(null);
+    await refresh();
+    toast("已保存");
   };
   const toggle = async (t: Trigger) => {
     try {
@@ -185,19 +142,6 @@ export default function Automation({ onOpenMenu }: { onOpenMenu: () => void }) {
       toast((e as Error).message, "error");
     }
   };
-  const preset = (value: string) => {
-    setTemplate(value);
-    if (value !== "wechat" || !draft) return;
-    const machine = params.get("machine") || "";
-    const defaults = fresh();
-    setDraft({
-      ...draft,
-      name: draft.name || "微信消息检查",
-      source: { type: "mcp", connection: "woc", uri: `wechat://${machine}/messages` },
-      action: defaults.action,
-    });
-    setArgs(JSON.stringify(wechatDefaults(machine), null, 2));
-  };
   if (user?.role !== "admin") return <div className="empty">自动化当前仅供管理员使用。</div>;
   return (
     <section className="automation-page">
@@ -207,6 +151,9 @@ export default function Automation({ onOpenMenu }: { onOpenMenu: () => void }) {
         </button>
         <span className="ws-title">自动化</span>
         <span className="agent-spacer" />
+        <a className="btn-text" href="/automation-guide.html" target="_blank" rel="noreferrer">
+          使用说明 ↗
+        </a>
         <button className="btn btn-primary" onClick={() => edit(fresh())}>
           新建
         </button>
@@ -239,8 +186,15 @@ export default function Automation({ onOpenMenu }: { onOpenMenu: () => void }) {
                       ? "Webhook"
                       : t.source.type === "interval"
                         ? `每 ${t.source.seconds} 秒`
-                        : t.source.expression}{" "}
-                  · {t.action.type === "agent" ? "Agent 任务" : "脚本"}
+                        : t.source.type === "once"
+                          ? `${time(Date.parse(t.source.at || ""))}（一次）`
+                          : t.source.expression}{" "}
+                  ·{" "}
+                  {t.steps
+                    ? `${t.steps.length} 个步骤`
+                    : t.action?.type === "agent"
+                      ? "Agent 任务"
+                      : "脚本"}
                   {t.next_run ? ` · 下次 ${time(t.next_run)}` : ""}
                 </p>
               </div>
@@ -295,335 +249,14 @@ export default function Automation({ onOpenMenu }: { onOpenMenu: () => void }) {
         </div>
       </main>
       {draft && (
-        <div className="modal-mask">
-          <div
-            className="card modal auto-editor"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="automation-editor-title"
-          >
-            <h2 id="automation-editor-title">{draft.id ? "编辑自动化" : "新建自动化"}</h2>
-            {!draft.id && (
-              <label>
-                套用预置模板（可选）
-                <select
-                  aria-label="预置模板"
-                  value={template}
-                  onChange={(e) => preset(e.target.value)}
-                >
-                  <option value="">自定义配置</option>
-                  <option value="wechat">微信消息检查</option>
-                </select>
-              </label>
-            )}
-            <form
-              className="auto-editor-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void save();
-              }}
-            >
-              <label>
-                名称
-                <input
-                  required
-                  value={draft.name}
-                  maxLength={120}
-                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                />
-              </label>
-              <fieldset>
-                <legend>什么时候触发</legend>
-                <select
-                  aria-label="触发条件"
-                  value={draft.source.type}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      source:
-                        e.target.value === "mcp"
-                          ? { type: "mcp", connection: connections[0] || "", uri: "" }
-                          : e.target.value === "cron"
-                            ? { type: "cron", expression: "0 9 * * *", timezone: "Asia/Shanghai" }
-                            : e.target.value === "interval"
-                              ? { type: "interval", seconds: 60 }
-                              : { type: "webhook" },
-                    })
-                  }
-                >
-                  <option value="interval">每隔一段时间</option>
-                  <option value="cron">每天 / Cron 定时</option>
-                  <option value="mcp">MCP 资源更新</option>
-                  <option value="webhook">Webhook 通知</option>
-                </select>
-                {draft.source.type === "interval" && (
-                  <label>
-                    间隔（秒）
-                    <input
-                      type="number"
-                      min={5}
-                      max={31536000}
-                      required
-                      value={draft.source.seconds}
-                      onChange={(e) =>
-                        setDraft({
-                          ...draft,
-                          source: { ...draft.source, seconds: Number(e.target.value) },
-                        })
-                      }
-                    />
-                  </label>
-                )}
-                {draft.source.type === "cron" && (
-                  <>
-                    <label>
-                      每天的时间
-                      <input
-                        type="time"
-                        onChange={(e) => {
-                          const [h, m] = e.target.value.split(":").map(Number);
-                          if (Number.isFinite(h) && Number.isFinite(m))
-                            setDraft({
-                              ...draft,
-                              source: { ...draft.source, expression: `${m} ${h} * * *` },
-                            });
-                        }}
-                      />
-                    </label>
-                    <label>
-                      Cron（分 时 日 月 周）
-                      <input
-                        required
-                        value={draft.source.expression}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            source: { ...draft.source, expression: e.target.value },
-                          })
-                        }
-                      />
-                    </label>
-                    <label>
-                      时区
-                      <input
-                        required
-                        value={draft.source.timezone}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            source: { ...draft.source, timezone: e.target.value },
-                          })
-                        }
-                      />
-                    </label>
-                  </>
-                )}
-                {draft.source.type === "mcp" && (
-                  <>
-                    <label>
-                      连接
-                      <select
-                        value={draft.source.connection}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            source: { ...draft.source, connection: e.target.value },
-                          })
-                        }
-                      >
-                        {connections.map((c) => (
-                          <option key={c}>{c}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      资源 URI
-                      <input
-                        required
-                        value={draft.source.uri}
-                        placeholder="wechat://电脑ID/messages"
-                        onChange={(e) =>
-                          setDraft({ ...draft, source: { ...draft.source, uri: e.target.value } })
-                        }
-                      />
-                    </label>
-                  </>
-                )}
-                {draft.source.type === "webhook" && (
-                  <p className="muted">保存后提供接收地址和独立密钥。每次请求分别执行。</p>
-                )}
-              </fieldset>
-              <fieldset>
-                <legend>执行什么</legend>
-                <select
-                  aria-label="执行动作"
-                  value={draft.action.type}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      action:
-                        e.target.value === "agent"
-                          ? {
-                              type: "agent",
-                              agent_id: "",
-                              message: "",
-                              include_input: true,
-                              timeout_seconds: 1800,
-                            }
-                          : {
-                              type: "script",
-                              command: "python3",
-                              args: [],
-                              cwd: "/workspace/woc",
-                              timeout_seconds: 300,
-                            },
-                    })
-                  }
-                >
-                  <option value="script">运行脚本</option>
-                  <option value="agent">给 Agent 发送任务</option>
-                </select>
-                {draft.action.type === "script" ? (
-                  <>
-                    <label>
-                      程序
-                      <input
-                        required
-                        value={draft.action.command}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            action: { ...draft.action, command: e.target.value },
-                          })
-                        }
-                      />
-                    </label>
-                    <label>
-                      参数（JSON 数组）
-                      <textarea
-                        required
-                        rows={4}
-                        value={args}
-                        onChange={(e) => setArgs(e.target.value)}
-                      />
-                    </label>
-                    <WechatArguments
-                      machines={instances}
-                      agents={agents}
-                      args={args}
-                      onChange={setArgs}
-                      onMachineChange={(oldMachine, machine) => {
-                        if (
-                          draft.source.type === "mcp" &&
-                          draft.source.uri === `wechat://${oldMachine}/messages`
-                        )
-                          setDraft({
-                            ...draft,
-                            source: { ...draft.source, uri: `wechat://${machine}/messages` },
-                          });
-                      }}
-                    />
-                    <label>
-                      工作目录
-                      <input
-                        required
-                        value={draft.action.cwd}
-                        onChange={(e) =>
-                          setDraft({ ...draft, action: { ...draft.action, cwd: e.target.value } })
-                        }
-                      />
-                    </label>
-                  </>
-                ) : (
-                  <>
-                    <label>
-                      目标会话
-                      <select
-                        required
-                        value={draft.action.agent_id}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            action: { ...draft.action, agent_id: e.target.value },
-                          })
-                        }
-                      >
-                        <option value="">选择会话</option>
-                        {agents
-                          .filter((a) => !a.archived)
-                          .map((a) => (
-                            <option key={a.id} value={a.id}>
-                              {a.title}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-                    <label>
-                      任务内容
-                      <textarea
-                        required
-                        rows={4}
-                        value={draft.action.message}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            action: { ...draft.action, message: e.target.value },
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="auto-toggle">
-                      <input
-                        type="checkbox"
-                        checked={draft.action.include_input !== false}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            action: { ...draft.action, include_input: e.target.checked },
-                          })
-                        }
-                      />
-                      附带触发输入
-                    </label>
-                    <p className="muted">等待会话空闲后提交。建议使用独立的自动化会话。</p>
-                  </>
-                )}
-                <label>
-                  执行超时（秒）
-                  <input
-                    required
-                    type="number"
-                    min={1}
-                    max={3600}
-                    value={draft.action.timeout_seconds}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        action: { ...draft.action, timeout_seconds: Number(e.target.value) },
-                      })
-                    }
-                  />
-                </label>
-              </fieldset>
-              <label className="auto-toggle">
-                <input
-                  type="checkbox"
-                  checked={draft.enabled}
-                  onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
-                />
-                保存后启用
-              </label>
-              <div className="modal-actions">
-                <button className="btn" type="button" onClick={() => setDraft(null)}>
-                  取消
-                </button>
-                <button className="btn btn-primary" disabled={saving}>
-                  {saving ? "保存中…" : "保存"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <AutomationEditor
+          initial={draft}
+          catalog={catalog}
+          agents={agents}
+          machine={params.get("machine") || ""}
+          onSave={save}
+          onClose={() => setDraft(null)}
+        />
       )}
       {secret && (
         <div className="modal-mask">
@@ -651,13 +284,43 @@ export default function Automation({ onOpenMenu }: { onOpenMenu: () => void }) {
             <p>
               {status[detail.status]} · {time(detail.created)}
             </p>
-            {detail.result?.agent_id && (
-              <a href={"/agent?conversation=" + detail.result.agent_id}>打开 Agent 会话</a>
+            {detail.result?.steps ? (
+              detail.result.steps.map((step) => (
+                <details key={step.id} open className="auto-result-step">
+                  <summary>
+                    {step.id} · {status[step.status] || step.status}
+                  </summary>
+                  {step.agent_id && (
+                    <a href={"/agent?conversation=" + encodeURIComponent(step.agent_id)}>
+                      打开 Agent 会话
+                    </a>
+                  )}
+                  {step.error && <p className="auto-error">{step.error}</p>}
+                  {step.output && (
+                    <>
+                      <h4>输出</h4>
+                      <pre className="auto-log">{step.output.text || "空输出"}</pre>
+                    </>
+                  )}
+                  {step.stderr && (
+                    <>
+                      <h4>诊断日志</h4>
+                      <pre className="auto-log">{step.stderr}</pre>
+                    </>
+                  )}
+                </details>
+              ))
+            ) : (
+              <>
+                {detail.result?.agent_id && (
+                  <a href={"/agent?conversation=" + detail.result.agent_id}>打开 Agent 会话</a>
+                )}
+              </>
             )}
-            <pre className="auto-log">{detail.log || "无输出"}</pre>
-            {detail.result && (
-              <pre className="auto-log">{JSON.stringify(detail.result, null, 2)}</pre>
-            )}
+            <details>
+              <summary>完整运行日志</summary>
+              <pre className="auto-log">{detail.log || "无诊断日志"}</pre>
+            </details>
             <button className="btn" onClick={() => setDetail(null)}>
               关闭
             </button>

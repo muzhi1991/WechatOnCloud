@@ -67,3 +67,28 @@ API、状态、队列、幂等保留窗口与容量边界见 [服务 README](../
 最终重启验收：仅重启专用 Agent 容器后，关联电脑、停用状态、14 条执行记录均保留，运行队列为空，未重放任务。微信、浏览器、完整桌面、独立 Cua worker 的容器 ID 与启动时间逐一对比部署前快照完全一致。验收触发器已删除、两个新建测试会话已归档（历史保留），原有会话未改动，未开启常驻自动回复。
 
 浏览器回归：远端 VNC 已连接时，打开/关闭 AI 抽屉保持同一个桌面 iframe；10 Mbps 限速测试，AI 页面冷启动约 4.9 秒，缓存后刷新约 0.44 秒。静态资源仍复用 Paseo Web 主包，本轮未拆分上游应用包。
+
+## 自动化编辑器与串行步骤（2026-10-30 第二版）
+
+本节取代前面单 action 编辑器的当前使用说明；旧 `action` 配置及旧微信脚本仍兼容。新增配置统一使用 `steps`，没有改动 Paseo schedules、桌面 daemon 或 GUI 写锁分层。
+
+- 页面按「触发条件 → 顺序步骤」组织。模板只预填同一表单；新增脚本选择、描述文件生成参数、动态搜索选项、变量插入、步骤排序、独立输出/日志和每步 Agent 会话链接。
+- 脚本目录 `/workspace/woc/automation/scripts/`，Python/Shell 配 `同名.action.json`；无描述文件用原始 argv 兜底。`--help` 和 `--list-options` 仅显式按需执行。下拉选项查询为异步短任务；不扫描容器进程或执行前置业务 action。
+- 触发源新增一次性日期；日/周/月表单映射到原 Cron，并预览时区换算后的未来时间。MCP 仅枚举注册连接，检查 subscribe；WOC 资源列表仅返回读取服务就绪的电脑。
+- 串行运行：stdout 文本/JSON → 后一步 stdin，stderr 单独保留。变量和环境绑定由执行器解析，禁止 eval/shell 展开，不依赖子进程 export。稳定步骤 ID，保存时拒绝失效/向后引用。细节见 [trigger README](../../services/woc-trigger/README.md)。
+- 新微信模板为 `wechat-read.py → Agent`，无消息输出为空并跳过。批次先持久化，只有整次运行成功后下次读取才确认进度。失败、结果不明、中断或前次记录过期均停下要求核对，不自动重发。
+- 用户指南为 [automation-guide.html](../../panel/web/public/automation-guide.html)，控制台自动化页和编辑器均有「使用说明」入口。客户端 [woc-automation Skill](../../integrations/skills/woc-automation/SKILL.md) 及 references 已同步，并部署至 Agent 容器。
+
+### 验收证据
+
+- 11 项 Node 自动化测试、3 项 Python 测试；MCP 真实 SDK 订阅测试、面板自动化鉴权代理测试均通过；TypeScript 和 Web 构建通过，Skill validator 通过。
+- Chrome 对本地构建和实际统一控制台均执行：模板同表单预填、真实机器/资源/对话搜索、首次基线跳过 Agent、保存/编辑；日历与一次性预览、枚举按钮、动态 provider 的 stdin/env 一致性、依赖参数清空、原始 JSON 参数校验、变量菜单、向后引用拒绝、真实两步脚本执行；桌面/窄屏无横向溢出，帮助链接可打开。
+- 真实 Pi Agent 阅读更新 Skill，调用 catalog/discover/validate/create/run/log/delete 完成仅属自己的 disabled 验收自动化。首次发现宿主创建的 automation 目录权限不对，修复为容器用户可写后复验成功。
+- 用户补发的测试消息触发真实 `resource_updated`，读取 1 条并由第二步 Agent 汇总；重复检查返回空输出并跳过 Agent。未发送微信回复，未申请 GUI 写锁。完整证据保留在服务器私有 `/state/automation-v2-*-proof.json` 与运行记录，原始聊天和截图不提交。
+- 临时验收自动化和脚本清理；验收会话归档，历史运行保留。微信、浏览器、完整桌面及独立 Cua 容器 ID/StartedAt 与部署前基线核对。
+
+### 部署与回退
+
+仅替换统一 panel 镜像及 `/opt/woc/services/woc-trigger`、Skill；单独重启 trigger 子进程，Paseo/桌面不重启。固定 Node base digest 沿用原值。新增示例脚本由 configure 仅在缺失时复制，不能覆盖用户文件；共享 automation 目录须对 Agent uid 1000 可写。
+
+本次回退备份位于服务器 `/root/woc-agent/rollback/20261030-automation-pipeline/`，含旧 trigger、Skill、旧私有状态和 panel.env。回退需先暂停并核对新运行，保存当前数据库；恢复旧 panel 镜像与旧服务代码。旧服务不能执行 `steps`，不能让它读取第二版新增配置；若恢复旧状态快照，会丢失快照之后的自动化配置与运行，必须显式核对后选择，不能以回退名义无声覆盖。没有改数据库表结构，原单 action 记录保持可读。
