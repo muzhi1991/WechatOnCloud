@@ -15,7 +15,7 @@ test('application writes use the existing lock; errors preserve prerequisites an
   await writeFile(clients,JSON.stringify([{id:'test',label:'Test',tokenHash:createHash('sha256').update(token).digest('hex'),machines:['one']}]));
   await writeFile(service,'s'.repeat(48));process.env.WOC_CLIENTS_FILE=clients;
   let calls=0, epoch='', failureStatus=409;
-  const upstream=http.createServer((req,res)=>{calls++;epoch=String(req.headers['x-woc-control-epoch']||'');req.resume();res.setHeader('content-type','application/json');res.statusCode=req.url?.endsWith('/ui_state')?200:failureStatus;res.end(JSON.stringify(res.statusCode===200?{page:'contacts'}:{ok:false,code:'WOC_WRONG_PAGE',execution:'not_started',precondition:{page:'chat'}}));});
+  const upstream=http.createServer((req,res)=>{calls++;epoch=String(req.headers['x-woc-control-epoch']||'');req.resume();res.setHeader('content-type','application/json');res.statusCode=(req.url?.endsWith('/ui_state') || req.url?.endsWith('/browser_state'))?200:failureStatus;res.end(JSON.stringify(res.statusCode===200?{page:'contacts'}:{ok:false,code:'WOC_WRONG_PAGE',execution:'not_started',precondition:{page:'chat'}}));});
   await new Promise<void>(r=>upstream.listen(0,'127.0.0.1',r));
   const leases=new ControlLeases();const adapter={revoke:async()=>{},reset:async()=>{},grantHuman:async()=>{}};
   await leases.ensure('one',1,adapter);
@@ -24,8 +24,12 @@ test('application writes use the existing lock; errors preserve prerequisites an
   const call=(op:string,payload={},extra={})=>app.inject({method:'POST',url:`/api/integrations/wechat/one/${op}`,headers:{...headers,...extra},payload});
   try {
     assert.equal((await call('ui_state')).statusCode,200);assert.equal(epoch,'');
-    const before=calls;const denied=await call('navigate',{page:'contacts'});
+    let before=calls;const denied=await call('navigate',{page:'contacts'});
     assert.equal(denied.json().code,'WOC_LOCK_REQUIRED');assert.equal(calls,before);
+    assert.equal((await call('browser_state')).statusCode,200);assert.equal(epoch,'');
+    const browserBefore=calls;
+    assert.equal((await call('browser_open_url',{window_ref:'a'.repeat(32),url:'https://linux.weixin.qq.com'})).json().code,'WOC_LOCK_REQUIRED');
+    assert.equal(calls,browserBefore);before=calls;
     const actor={kind:'agent' as const,id:'client:test',label:'Test'};
     // Use the same identity construction as actual client routes.
     const { clientActor }=await import('../control/clients.js');
@@ -36,6 +40,9 @@ test('application writes use the existing lock; errors preserve prerequisites an
     const result=await call('navigate',{page:'contacts'},{'x-woc-expected-epoch':lease.epoch});
     assert.equal(result.statusCode,409);assert.deepEqual(result.json().precondition,{page:'chat'});assert.equal(epoch,lease.epoch);
     assert.equal(leases.status('one',realActor).mine,true);assert.equal(leases.status('one').state,'agent');
+    const browser=await call('browser_open_url',{window_ref:'a'.repeat(32),url:'https://linux.weixin.qq.com'},{'x-woc-expected-epoch':lease.epoch});
+    assert.equal(browser.statusCode,409);assert.equal(epoch,lease.epoch);
+    assert.deepEqual(browser.json().precondition,{page:'chat'});
     failureStatus=503;
     const unavailable=await call('navigate',{page:'contacts'});
     assert.equal(unavailable.statusCode,503);assert.equal(unavailable.json().execution,'not_started');

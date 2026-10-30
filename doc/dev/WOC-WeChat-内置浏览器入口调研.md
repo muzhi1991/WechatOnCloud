@@ -69,3 +69,53 @@ REA 诊断显示当前 Node 补丁版本、JAVA_HOME/注册及分析引擎未满
 - 最后保留“搜一搜”和官网标签供人工查看，已通过 `direct-release.json` 确认写锁释放。
 
 因此后续客户端脚本可以直接执行“微信主窗口 → 搜一搜 → 顶部网址输入框 → URL → Enter”。现有 UI 已满足这一需求，本次没有再运行裸 WeChatAppEx 或试探启动参数。这里的“直接打开”指微信运行且已登录、浏览器窗口不存在的情况；后台 WeChatAppEx 进程此前仍在，不能把本次结果描述为彻底终止浏览器进程后的独立进程冷启动。
+
+## 实施与验收：客户端 open-url（2026-10-30）
+
+以上章节记录首次调研。本节为随后经用户确认实施的结果。
+
+### 入口与职责
+
+```sh
+python3 integrations/skills/woc-wechat/scripts/wechat.py \
+  --config PRIVATE_CONFIG --machine MACHINE_ID \
+  open-url --url 'https://mp.weixin.qq.com/s/ARTICLE_ID'
+```
+
+| HTTP 操作（`/api/integrations/wechat/:machine/`） | MCP 工具 | 权限 / 行为 |
+| --- | --- | --- |
+| `browser_state {}` | `woc_wechat_browser_state` | 无锁读；返回 `open`、`documents`（title/url/busy/document_id）、dialog、60 秒调用者绑定的 window_ref |
+| `navigate {page:"web_search"}` | `woc_wechat_navigate` | 写锁；聚焦唯一主微信窗口，点击侧栏“搜一搜”，不等待网页加载 |
+| `browser_open_url {window_ref,url}` | `woc_wechat_browser_open_url` | 写锁；验证窗口引用，聚焦内置浏览器，展开/填入顶部原生输入框，核对内容后回车 |
+
+- Skill 脚本负责锁、浏览器是否存在的判断、前置导航、有限次数只读观察及 finally 释放。正常路径无需 Agent 逐步找按钮；异常交给 Agent/Cua。
+- 网关只沿用共享 `ui-contract.mjs` 注册、鉴权和写锁检查。MCP 同一契约自动注册新工具；没有改原始 Cua MCP 或 Skill。
+- daemon 新增独立 `wechat_browser.py`，只提供原子操作，不反向调用网关，不获取锁，不自动执行缺失的前置步骤。部署同时更新 installer/init/可选镜像文件清单。
+- 识别同用户 WeChatAppEx 主进程和 AT-SPI 服务，不硬编码 PID。引用绑定进程启动时间、服务、窗口和树节点；不能跨调用者或跨窗口重建使用。
+- 浏览器结构遍历止于 `document web`，不从网页内挑选地址输入框。单窗口之外、多义窗口、未知弹窗、已有地址草稿和过期引用均要求调用者处理。支持 HTTP(S)，URL 上限 8192 字符，不支持文件或 JavaScript 等 URL Scheme。
+- 顶部输入框收起时可能仍有旧尺寸，也可能是零尺寸；根据原生父控件和新观测展开。地址建议是输入框下方的原生无标题浮层，需要与真正的额外窗口区分。
+
+### 验收结果
+
+在 P5 微信测试实例 `77bafd5161` 上，通过真实客户端脚本、WOC MCP 和原始 Cua 调用验证：
+
+1. 已有浏览器：脚本直接打开微信 Linux 官网新标签，读到新文档和标题，自动释放锁。
+2. 无浏览器窗口：用 Cua 在持锁期间关闭窗口、交回控制，再运行脚本；脚本自动通过“搜一搜”建立窗口并打开目标网址。
+3. 用户从“李牧之”分享的公众号文章：从现有本地消息查询获得 URL，通过脚本打开；截图确认《智能算力全球第二！一张全国网，重塑生产与生活》正文可见。最终还验证了“无浏览器窗口 → 脚本启动 → 此公众号 URL”的完整路径。未发送聊天消息。
+4. 真实 MCP SDK 客户端发现新工具；无锁读取成功、无锁写入返回 `WOC_LOCK_REQUIRED`、错误窗口引用返回 `WOC_UI_STALE`、持锁打开网址成功并释放。错误保留在模型可见的 MCP 返回中。
+5. 本地 Python 26 项测试通过，包括调用者绑定、引用类型/过期、非法 URL、空尺寸输入框、地址建议浮层、已有草稿保护、缺失窗口分支、不确定结果不重试、读取旧文档不算新导航、finally 释放。网关 business 3 项、真实 MCP SDK 集成测试、服务端 TypeScript 检查和 Skill 校验通过。
+
+真实测试中修复了现有 `Desktop.click` 的一个问题：`xdotool mousemove --sync` 在鼠标已经位于目标点时会等待超时。改为同一 xdotool 调用中依序发送 mousemove/click；此前的超时由网关按规则阻止后续写入，经确认画面未提交网址后使用现有管理员 control/recover 接口恢复，没有绕过锁。临时诊断代码未保留在正式代码中。
+
+### 返回值的限度
+
+`url_submitted` 只代表输入框内容核对并提交；`new_document_observed` 只代表观察到新文档，**不是文章内容可访问的判定**。公众号加载中可能短暂显示“微信公众平台”，后续才变为文章标题；需要阅读正文时继续用 `browser_state` 或 Cua 查看。登录/验证/错误页不会被脚本自动处理。
+
+微信可能给 URL 追加会话参数。因此返回原始 `requested_url_matches`，不强行将追加参数或重定向判为打开失败。原始 URL、查询结果、截图只放私有 artifacts，不提交到代码库或公开报告。脚本未建立下载、抓取正文、绕过验证码等能力。
+
+### 部署与回退
+
+- 面板镜像：`local/woc-panel:browser-open-url-v1`，`sha256:6791471ddc43e735df41d60f952a3f081e920be2443a1b43930f6f309737ac5f`。相对上一版只增量替换接口契约，保留现有前端。统一 compose `.env` 已固定此镜像。
+- 更新微信容器内 `/config/woc-read` 与 `/opt/woc-read` 的模块及初始化脚本；只重启 `woc-read` 服务。应用容器、微信进程、独立 Cua 容器没有重建或重启。
+- 部署前备份在 Docker 主机 `/root/woc-ui-private/browser-open-url-v1`。回退面板使用备份 `panel.env`（上一版镜像 `sha256:17207f63de0820d0be01ee6f50887613edb381da960e0785c9cf5492016a357f`）；回退 daemon 将备份的 ui_service.py / wechat_ui.py 恢复到两个模块目录，再只重启 `woc-read`。保留私有配置、密钥和发送收据库。
+- 可复查的私有证据：`artifacts/wechat-browser-implementation/workflow-existing.json`、`workflow-launch-fixed.json`、`workflow-article.json`、`mcp-acceptance.json`；截图在 `artifacts/wechat-browser-research/impl-*.png`。不把这些原始数据加入 Git。

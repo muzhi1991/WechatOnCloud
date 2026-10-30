@@ -16,7 +16,7 @@ class UIError(Exception):
         self.result = dict(ok=False, code=code, error=message, execution=execution, **details)
 
 
-NAV = {"conversations": "微信", "contacts": "通讯录", "favorites": "收藏"}
+NAV = {"conversations": "微信", "contacts": "通讯录", "favorites": "收藏", "web_search": "搜一搜"}
 SECTIONS = {"联系人": "contact", "群聊": "group", "功能": "function", "聊天记录": "history",
             "搜索网络结果": "network", "收藏": "favorite", "公众号": "official"}
 
@@ -137,7 +137,7 @@ def classify(nodes):
 
 
 class Desktop:
-    def __init__(self, config):
+    def __init__(self, config, browser=False):
         import dbus
         self.dbus = dbus
         self.started = time.monotonic()
@@ -148,8 +148,12 @@ class Desktop:
             if not p.name.isdigit(): continue
             try:
                 exe = str((p/'exe').resolve(strict=True))
-                if exe.endswith('/opt/wechat/wechat') and p.stat().st_uid == os.getuid(): pids.append(int(p.name))
+                suffix='/opt/wechat/RadiumWMPF/runtime/WeChatAppEx' if browser else '/opt/wechat/wechat'
+                if exe.endswith(suffix) and p.stat().st_uid == os.getuid():
+                    if not browser or b'--type=' not in (p/'cmdline').read_bytes():pids.append(int(p.name))
             except OSError: pass
+        if browser and not pids:
+            self.service=None;return
         if len(pids) != 1: raise UIError("WOC_APP_UNAVAILABLE", "Expected exactly one running WeChat process", precondition={"app":"wechat","process_count":len(pids)})
         self.pid = pids[0]
         self.bus = dbus.bus.BusConnection(config.get("bus", "unix:path=/config/.XDG/at-spi/bus_1"))
@@ -209,7 +213,9 @@ class Desktop:
         if w<4 or h<4: raise UIError("WOC_UI_TARGET_UNAVAILABLE","Target has no usable bounds")
         px,py=point or (x+w//2,y+h//2)
         self.dispatched=True
-        self.cmd(['xdotool','mousemove','--sync',str(px),str(py),'click','1'])
+        # X requests are ordered. --sync can wait forever when the pointer
+        # already occupies this position (no movement event is generated).
+        self.cmd(['xdotool','mousemove',str(px),str(py),'click','1'])
 
     def paste(self,text,replace=False):
         self.foreground()
@@ -228,6 +234,11 @@ class Desktop:
         if op=='navigate':
             n=controls['nav'].get(body['page'])
             if not n: raise UIError("WOC_PAGE_UNSUPPORTED","Requested navigation entry is unavailable")
+            if body['page']=='web_search':
+                windows=self.cmd(['xdotool','search','--all','--onlyvisible','--pid',str(self.pid),'--name','^微信$']).decode().split()
+                if len(windows)!=1:raise UIError('WOC_APP_UNAVAILABLE','Expected a unique main WeChat window')
+                self.dispatched=True
+                self.cmd(['xdotool','windowactivate','--sync',windows[0]])
             self.click(n)
         elif op=='ui_search':
             expected={'conversations':('chat','conversations','search_results'),'contacts':('contacts','contact_profile','search_results')}
@@ -260,7 +271,10 @@ def main():
     desktop=None
     try:
         request=json.load(sys.stdin)
-        desktop=Desktop(request.get('config',{}))
+        if request['operation'].startswith('browser_'):
+            from wechat_browser import Browser
+            desktop=Browser(request.get('config',{}))
+        else:desktop=Desktop(request.get('config',{}))
         result=desktop.execute(request['operation'],request['body'])
     except UIError as e:
         result=e.result
@@ -271,4 +285,6 @@ def main():
     print(json.dumps(result,ensure_ascii=False))
 
 
-if __name__=='__main__': main()
+if __name__=='__main__':
+    sys.modules['wechat_ui']=sys.modules[__name__]
+    main()

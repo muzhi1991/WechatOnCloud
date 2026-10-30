@@ -64,7 +64,7 @@ def main():
     shutil.copyfile(args.vault, target / 'private/keys.json')
     (target / 'private/service.token').write_text(token)
     shutil.copyfile(repository / 'services/woc-daemon/server.py', target / 'server.py')
-    for module in ['ui_service.py', 'wechat_ui.py']:
+    for module in ['ui_service.py', 'wechat_ui.py', 'wechat_browser.py']:
         shutil.copyfile(repository / 'services/woc-daemon' / module, target / module)
     config = json.loads((repository / 'deploy/read-daemon/config.example.json').read_text())
     (target / 'config.json').write_text(json.dumps(config))
@@ -84,7 +84,7 @@ def main():
     # The initial install uses the persistent copy; later image layers ship /opt/woc-read.
     docker('exec', args.container, 'mkdir', '-p', '/opt/woc-read')
     docker('cp', str(repository / 'services/woc-daemon/server.py'), args.container + ':/opt/woc-read/server.py')
-    for module in ['ui_service.py', 'wechat_ui.py']:
+    for module in ['ui_service.py', 'wechat_ui.py', 'wechat_browser.py']:
         docker('cp', str(repository / 'services/woc-daemon' / module), args.container + ':/opt/woc-read/' + module)
     docker('exec', args.container, 'bash', '/custom-cont-init.d/09-woc-read')
     targets_file = credentials / 'targets.json'

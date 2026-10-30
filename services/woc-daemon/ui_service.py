@@ -18,11 +18,12 @@ import time
 from wechat_ui import UIError
 
 FIELDS={
+    'browser_state':set(), 'browser_open_url':{'window_ref','url'},
     'ui_state':set(), 'navigate':{'page'}, 'ui_search':{'scope','query'},
     'open_item':{'target_ref'}, 'fill_text':{'expected_chat','text','expected_draft'},
     'send_draft':{'expected_chat','expected_text','request_id'}, 'ui_request_status':{'request_id'},
 }
-READS={'ui_state','ui_request_status'}
+READS={'ui_state','ui_request_status','browser_state'}
 
 
 def validate(op,body):
@@ -31,13 +32,16 @@ def validate(op,body):
     required=FIELDS[op]-({'expected_draft'} if op=='fill_text' else set())
     if required-body.keys(): raise UIError('WOC_INVALID_ARGUMENT','Missing required argument')
     for k,v in body.items():
-        if not isinstance(v,str) or '\0' in v or len(v)> (2000 if k in ('text','expected_text','expected_draft') else 256):
+        if not isinstance(v,str) or '\0' in v or len(v)> (8192 if k=='url' else 2000 if k in ('text','expected_text','expected_draft') else 256):
             raise UIError('WOC_INVALID_ARGUMENT','Invalid string argument')
         if not v and k!='expected_draft': raise UIError('WOC_INVALID_ARGUMENT','Empty argument')
-    if op=='navigate' and body['page'] not in ('conversations','contacts','favorites'):
+    if op=='navigate' and body['page'] not in ('conversations','contacts','favorites','web_search'):
         raise UIError('WOC_PAGE_UNSUPPORTED','Unsupported navigation page')
     if op=='ui_search' and body['scope'] not in ('conversations','contacts'):
         raise UIError('WOC_INVALID_ARGUMENT','Unsupported search scope')
+    if op=='browser_open_url':
+        from wechat_browser import validate_url
+        validate_url(body['url'])
     if 'request_id' in body and not re.fullmatch(r'[a-zA-Z0-9_-]{16,128}',body['request_id']):
         raise UIError('WOC_INVALID_ARGUMENT','request_id must be a unique 16..128 character identifier')
 
@@ -96,9 +100,19 @@ class UIService:
             payload=dict(body)
             if op=='open_item':
                 ref=self.refs.get(body['target_ref'])
-                if not ref or ref['owner']!=owner: raise UIError('WOC_UI_STALE','Item reference expired or belongs to another caller; observe again')
+                if not ref or ref['owner']!=owner or ref.get('kind')=='browser': raise UIError('WOC_UI_STALE','Item reference expired or belongs to another caller; observe again')
                 payload={'_target':ref['target'],'_identity':ref['identity']}
+            if op=='browser_open_url':
+                ref=self.refs.get(body['window_ref'])
+                if not ref or ref['owner']!=owner or ref.get('kind')!='browser':raise UIError('WOC_UI_STALE','Browser reference expired or belongs to another caller; observe again')
+                payload={'_identity':ref['identity'],'url':body['url']}
             result=self.runner(op,payload)
+            if op=='browser_state' and result.get('open'):
+                identity=result.pop('_identity');result.pop('_controls',None)
+                if len(self.refs)>12800:self.refs.clear()
+                ref=secrets.token_hex(16)
+                self.refs[ref]=dict(owner=owner,kind='browser',identity=identity,expires=now+60)
+                result.update(window_ref=ref,reference_ttl_seconds=60)
             if op=='send_draft':
                 with self.db() as db:
                     if result.get('execution')=='not_started':

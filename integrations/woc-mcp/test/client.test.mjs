@@ -19,7 +19,7 @@ test('real MCP SDK client: tools, resources, live update, unsubscribe, reconnect
     if (req.headers.authorization !== 'Bearer ' + 'x'.repeat(48)) { res.writeHead(401); res.end('{}'); return; }
     if (req.url.includes('private')) { res.writeHead(404); res.end(JSON.stringify({ code: 'WOC_MACHINE_NOT_FOUND' })); return; }
     if (req.url.endsWith('/ui_search')) { res.writeHead(409); res.end(JSON.stringify({ ok: false, code: 'WOC_WRONG_PAGE', execution: 'not_started', precondition: { page: 'contacts' } })); return; }
-    if (req.url.endsWith('/navigate')) { assert.equal(req.headers['x-woc-expected-epoch'], 'a'.repeat(36)); }
+    if (req.url.endsWith('/navigate') || req.url.endsWith('/browser_open_url')) { assert.equal(req.headers['x-woc-expected-epoch'], 'a'.repeat(36)); }
     let result = {};
     if (req.url.endsWith('/machines')) result = { machines: [{ id: 'test', name: 'Test' }] };
     if (req.url.endsWith('/revision')) { polls++; result = { revision }; }
@@ -42,7 +42,7 @@ test('real MCP SDK client: tools, resources, live update, unsubscribe, reconnect
     first = await connect();
     assert.equal(first.client.getServerCapabilities().resources.subscribe, true);
     const tools = await first.client.listTools();
-    for (const name of ['woc_lock_acquire', 'woc_wechat_groups', 'woc_wechat_history', 'woc_wechat_extract']) assert.ok(tools.tools.some(x => x.name === name));
+    for (const name of ['woc_lock_acquire', 'woc_wechat_groups', 'woc_wechat_history', 'woc_wechat_extract', 'woc_wechat_browser_state', 'woc_wechat_browser_open_url']) assert.ok(tools.tools.some(x => x.name === name));
     assert.equal((await first.client.listResources()).resources[0].uri, 'wechat://test/messages');
     const response = await first.client.callTool({ name: 'woc_wechat_sessions', arguments: { machine_id: 'test', limit: 5 } });
     assert.equal(JSON.parse(response.content[0].text).sessions[0].unread, 2);
@@ -53,6 +53,8 @@ test('real MCP SDK client: tools, resources, live update, unsubscribe, reconnect
     assert.deepEqual(uiError.structuredContent.precondition, { page: 'contacts' });
     assert.equal(JSON.parse(uiError.content[0].text).execution, 'not_started');
     await first.client.callTool({ name: 'woc_wechat_navigate', arguments: { machine_id: 'test', page: 'contacts', lock_id: 'a'.repeat(36) } });
+    await first.client.callTool({ name: 'woc_wechat_browser_state', arguments: { machine_id: 'test' } });
+    await first.client.callTool({ name: 'woc_wechat_browser_open_url', arguments: { machine_id: 'test', window_ref: 'b'.repeat(32), url: 'https://linux.weixin.qq.com', lock_id: 'a'.repeat(36) } });
     await assert.rejects(first.client.subscribeResource({ uri: 'wechat://private/messages' }));
     assert.equal(polls, 0);
     await first.client.subscribeResource({ uri: 'wechat://test/messages' });

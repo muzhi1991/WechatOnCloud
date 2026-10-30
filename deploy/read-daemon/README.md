@@ -141,7 +141,7 @@ bus (see config.example.json). The adapter requires the desktop user's accessibl
 WeChat process, Python dbus, xdotool, xclip and the existing WOC input fence. It
 does not launch/restart WeChat, inject code, or read process memory.
 
-Package `server.py`, `ui_service.py`, and `wechat_ui.py` together in `/opt/woc-read`
+Package `server.py`, `ui_service.py`, `wechat_ui.py`, and `wechat_browser.py` together in `/opt/woc-read`
 and the persistent `/config/woc-read` copy. The updated installer and initializer
 handle these files. Only restart the `woc-read` s6 service for a code update; there
 is no need to restart the account or container. The optional image layer packages
@@ -153,8 +153,8 @@ forwarding mutations with its trusted admission epoch. The daemon never calls
 back, acquires a lock or fixes a missing prerequisite. Client scripts orchestrate.
 Do not expose the internal daemon port or its service credential to clients.
 
-`ui_state` and `ui_request_status` are observations. `navigate`, `ui_search`,
-`open_item`, `fill_text`, and `send_draft` are writes. Each local UI worker is
+`ui_state`, `ui_request_status`, and `browser_state` are observations. `navigate`, `ui_search`,
+`open_item`, `fill_text`, `send_draft`, and `browser_open_url` are writes. `navigate(page="web_search")` opens the sidebar 搜一搜 entry; the client script decides when this prerequisite is needed. Each local UI worker is
 bounded to five seconds and serialized without a waiting queue. The input fence
 drains an admitted operation before control handover; it is not another GUI
 ownership lock. UI references are caller-bound and expire after 60 seconds.
@@ -167,3 +167,20 @@ Same request ID with changed arguments is rejected. No automatic send retries.
 
 See [UI acceptance](../../doc/dev/WOC-WeChat-UI-验收.md) for page coverage, current
 image digests, actual sends and rollback.
+
+## WeChat embedded-browser workflow
+
+Run the installed `woc-wechat/scripts/wechat.py --config PRIVATE_CONFIG --machine ID open-url --url HTTPS_URL`.
+The client owns acquisition, prerequisite navigation, bounded observation and release.
+`browser_state` returns an opaque, caller-bound `window_ref` (60 seconds), current
+native browser document title/URL and busy observation. `browser_open_url` requires
+that reference and only accepts HTTP(S) URLs up to 8192 characters. It focuses the
+identified WeChatAppEx window, fills its native top URL field, verifies the draft
+and submits Enter. It never sends a chat message or launches another application.
+
+Browser chrome discovery stops at document nodes: page-controlled elements cannot
+be chosen as the native address field. Existing URL drafts, multiple browser windows,
+unknown overlays and expired/replaced references require caller intervention. Results
+say `url_submitted` or `new_document_observed`, not “article readable.” Actual URLs may
+contain WeChat-added session parameters; keep raw results and screenshots private.
+See [browser acceptance](../../doc/dev/WOC-WeChat-内置浏览器入口调研.md).

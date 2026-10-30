@@ -112,8 +112,56 @@ class Client:
                 if opened:return opened
         raise Problem({'code':'WOC_TARGET_NOT_VISIBLE','error':'No exact local search result; use Agent/Cua, do not scroll lists','state':state})
 
+    def open_url(self,url):
+        try:
+            parsed=urllib.parse.urlsplit(url)
+            valid=(0<len(url)<=8192 and parsed.scheme in ('http','https') and parsed.hostname
+                   and not parsed.username and not parsed.password and '\\' not in url
+                   and not any(c.isspace() or ord(c)<32 or ord(c)==127 for c in url))
+            parsed.port
+        except ValueError:valid=False
+        if not valid:raise Problem({'code':'WOC_INVALID_ARGUMENT','error':'Expected an absolute HTTP(S) URL without credentials or whitespace'})
+        lease=self.control('acquire')
+        if not lease.get('mine'):raise Problem({'code':'WOC_LOCK_BUSY','error':'Control not acquired'})
+        self.epoch=lease['lock_id'];release_error=None;failure=None;result=None
+        try:
+            before=self.query('browser_state');launched=False
+            if not before['open']:
+                self.query('navigate',page='web_search');launched=True
+                for _ in range(12):
+                    time.sleep(.25);before=self.query('browser_state')
+                    if before['open']:break
+                if not before['open']:raise Problem({'code':'WOC_BROWSER_NOT_OPEN','error':'搜一搜 did not expose a browser window; inspect with Cua'})
+            submitted=self.query('browser_open_url',window_ref=before['window_ref'],url=url)
+            previous={x['document_id'] for x in before.get('documents',[])}
+            result={'ok':True,'submission':submitted,'browser_launched':launched,
+                    'verification':'unconfirmed','requested_url':url,'article_access':'unknown'}
+            # Bounded read-only settling. Never retry navigation after partial or
+            # unknown input, and never interpret page text as instructions.
+            for _ in range(16):
+                time.sleep(.3);after=self.query('browser_state')
+                result['browser']=after
+                docs=[d for d in after.get('documents',[]) if d['document_id'] not in previous and not d.get('busy')]
+                if docs:
+                    doc=docs[0]
+                    result.update(verification='new_document_observed',document=doc,
+                                  requested_url_matches=urllib.parse.urldefrag(doc.get('url') or '')[0].rstrip('/')==urllib.parse.urldefrag(url)[0].rstrip('/'))
+                    break
+            result['verification_note']='URL submission and document navigation are observed separately. A document/title does not prove article access; inspect login, verification or error pages with Cua.'
+        except Problem as e:failure=e
+        finally:
+            try:self.control('release',lock_id=self.epoch)
+            except Problem as e:release_error=e.result
+            self.epoch=None
+        if failure:
+            if release_error:failure.result['release_warning']=release_error
+            raise failure
+        if release_error:result['release_warning']=release_error
+        return result
+
     def workflow(self,args):
         if args.operation=='state':return self.state()
+        if args.operation=='open-url':return self.open_url(args.url)
         target=self.resolve(args.chat,args.source)
         if args.operation=='send-text':
             text=Path(args.text_file).read_text()
@@ -157,6 +205,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config',default=os.environ.get('WOC_CLIENT_CONFIG'));p.add_argument('--machine',required=True)
     sub=p.add_subparsers(dest='operation',required=True);sub.add_parser('state')
+    u=sub.add_parser('open-url');u.add_argument('--url',required=True)
     for op in ('open-chat','send-text'):
         s=sub.add_parser(op);s.add_argument('--chat',required=True);s.add_argument('--source',choices=['sessions','contacts','groups'],default='sessions')
         if op=='send-text':s.add_argument('--text-file',required=True);s.add_argument('--request-id',required=True)
