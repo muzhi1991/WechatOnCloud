@@ -1,3 +1,4 @@
+import { ToolbarMenu } from '../ToolbarMenu';
 import { DesktopControls } from '../DesktopControls';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -1450,10 +1451,11 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {MenuIcon}
         </button>
         <span className="ws-title">{title}</span>
-        {inst?.lifecycleEnabled && <Activity id={id} admin={isAdmin} onVisibilityChange={value => { activityOpen.current = value; }} onBusyChange={value => { maintenanceRequest.current = value; }} />}
+        {showVnc && inst?.controlManaged && id && <ControlStrip id={id} status={control} admin={isAdmin} onChange={setControl} />}
+        {showVnc && !inst?.controlManaged && readOnly && <div className="control-strip"><span>只读 · {control?.holder}正在控制</span><button className="ws-action" onClick={takeControl}>申请控制</button></div>}
+        {!showVnc && inst?.lifecycleEnabled && <Activity id={id} admin={isAdmin} onVisibilityChange={value => { activityOpen.current = value; }} onBusyChange={value => { maintenanceRequest.current = value; }} />}
         {showVnc && (
-          // 操作按钮收进可横向滑动的容器：手机宽度放不下时在容器内滑动，而不是整排挤出屏幕
-          //（此前 390px 宽时「桌面」「重启」完全在屏幕外点不到，标题也被压成 0 宽）
+          // Frequent actions stay visible; secondary controls live in grouped popovers.
           <div className="ws-actions">
             {inst?.mode === 'desktop' && <DesktopControls id={id} frameRef={frameRef} stageRef={stageRef} frameGen={frameGen} readOnly={readOnly} epoch={control?.epoch} pressKey={pressKey} />}
 
@@ -1468,6 +1470,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             >
               {uploading ? `文件 ${uploadPct}` : '文件'}
             </button>
+            <ToolbarMenu label="更多">
+            <span className="toolbar-group-label">输入与剪贴板</span>
             <button
               className={'ws-action' + (inputMode === 'seamless' ? ' on' : '')}
               title={
@@ -1486,6 +1490,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             >
               剪贴板
             </button>
+            <span className="toolbar-group-label">音频</span>
             <button
               className={'ws-action' + (soundOn ? ' on' : '')}
               title={soundOn ? '声音已开：已连接实例音频。点击关闭（关闭可减少一条到实例的连接，更稳）' : '声音已关：默认不连音频桥（连接更稳）。点此开启以听到实例声音'}
@@ -1506,21 +1511,22 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                 麦克风：{micOn ? '开' : '关'}
               </button>
             )}
+            {(isAdmin || inst?.lifecycleEnabled) && <span className="toolbar-group-label">设置与维护</span>}
+            {inst?.lifecycleEnabled && <Activity id={id} admin={isAdmin} onVisibilityChange={value => { activityOpen.current = value; }} onBusyChange={value => { maintenanceRequest.current = value; }} />}
             {isAdmin && (
               <>
                 <button className={'ws-action' + (showSettings ? ' on' : '')} title="桌面设置（壁纸/字体）" onClick={() => { setShowSettings((v) => !v); if (!showSettings) { refreshBgList(); refreshFontList(); } }}>
-                  桌面
+                  外观设置
                 </button>
                 <button className="ws-action" title={inst?.mode === 'desktop' ? '重启完整桌面（关闭当前应用）' : '重启实例（修复卡死/最小化丢失）'} onClick={restartInstance}>
-                  重启
+                  重启实例
                 </button>
               </>
             )}
+            </ToolbarMenu>
           </div>
         )}
       </header>
-      {showVnc && inst?.controlManaged && id && <ControlStrip id={id} status={control} admin={isAdmin} onChange={setControl} />}
-      {showVnc && !inst?.controlManaged && readOnly && <div className="control-strip"><span>只读 · {control?.holder}正在控制</span><button className="ws-action" onClick={takeControl}>申请控制</button></div>}
 
       {/* —— 各种态 —— */}
       {!loaded || (probing && !inst) ? (
@@ -1642,7 +1648,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <div className="spinner" />
               <div className="iv-loading-text">正在连接桌面…</div>
               <div className="iv-loading-sub">{profile.enterHint}</div>
-              <div className="iv-loading-sub">拖文件到此处即可上传；需要声音点顶部「声音」开启，再在画面上点一下即出声</div>
+              <div className="iv-loading-sub">拖文件到此处即可上传；需要声音在顶部「更多 → 音频」开启声音，再在画面上点一下即出声</div>
               {!window.isSecureContext && (
                 <div className="iv-loading-warn">当前非 HTTPS 访问，浏览器将禁用麦克风与摄像头（音频播放不受影响）</div>
               )}

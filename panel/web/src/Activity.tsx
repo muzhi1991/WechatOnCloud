@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useEffect, useState } from 'react';
 import { api, type InstanceActivity } from './api';
 import { useUI } from './ui';
@@ -23,7 +24,7 @@ export function Activity({ id, admin, onVisibilityChange, onBusyChange }: { id: 
   };
   return <>
     <button className="ws-action" onClick={() => visibility(true)}>运行记录</button>
-    {open && <div className="modal-mask" onClick={() => visibility(false)}><section className="card modal" role="dialog" aria-label="运行记录" onClick={e => e.stopPropagation()} style={{ maxWidth: 720, width: '95%', maxHeight: '85vh', overflowY: 'auto' }}>
+    {open && createPortal(<div className="modal-mask" onClick={() => visibility(false)}><section className="card modal" role="dialog" aria-label="运行记录" onClick={e => e.stopPropagation()} style={{ maxWidth: 720, width: '95%', maxHeight: '85vh', overflowY: 'auto' }}>
       <h2>运行记录</h2>
       <p className="muted">中断后请先核对实际结果，再发起新任务。系统不会自动重放输入或发送操作。</p>
       {data?.maintenance && <p role="status">{data.maintenance.active ? '维护进行中' : '维护未完成，等待核对'}：{names[data.maintenance.name] || data.maintenance.name}</p>}
@@ -41,6 +42,6 @@ export function Activity({ id, admin, onVisibilityChange, onBusyChange }: { id: 
         </div>}
       </li>)}</ul>
       {data && !data.records.length && <p className="muted">暂无记录</p>}
-    </section></div>}
+    </section></div>, document.body)}
   </>;
 }

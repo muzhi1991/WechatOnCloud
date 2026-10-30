@@ -1734,8 +1734,9 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: calc(52px + env(safe-area-inset-top));
-  padding: env(safe-area-inset-top) 16px 0;
+  min-height: calc(52px + env(safe-area-inset-top));
+  flex-wrap: wrap;
+  padding: calc(8px + env(safe-area-inset-top)) 16px 8px;
   background: var(--base);
   box-shadow: inset 0 -1px 0 rgba(var(--shadow) / 0.07);
 }
@@ -1763,29 +1764,21 @@ button {
   border-radius: 9px;
   margin-left: -6px;
 }
-.ws-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0; /* 允许被压缩，放不下时在内部横向滑动 */
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-  /* 给按钮的折痕阴影留出上下空间，否则 overflow 会把阴影裁掉 */
-  padding: 6px 2px;
-  margin: -6px 0;
+.ws-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.toolbar-chevron { margin-left: 5px; opacity: .65; }
+.toolbar-popup {
+  position: fixed; z-index: 1100; width: 228px; max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 120px); overflow-y: auto; padding: 8px;
+  border: 1px solid rgba(var(--shadow) / .12); border-radius: 14px;
+  background: var(--surface); box-shadow: 0 8px 28px rgba(var(--shadow) / .22);
 }
-.ws-actions::-webkit-scrollbar {
-  display: none;
-}
-@media (max-width: 767px) {
-  /* 右侧渐隐，提示还能往右滑 */
-  .ws-actions {
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
-    mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
-    padding-right: 16px;
-  }
-}
+.toolbar-popup[hidden] { display: none; }
+.toolbar-group-label { display: block; padding: 8px 10px 4px; font-size: 11px; color: var(--muted); }
+.toolbar-group-label:not(:first-child) { margin-top: 5px; border-top: 1px solid rgba(var(--shadow) / .09); }
+.toolbar-popup .ws-action { display: block; width: 100%; text-align: left; border-radius: 8px; padding: 9px 10px; box-shadow: none; background: transparent; color: var(--text); }
+.toolbar-popup .ws-action:hover:not(:disabled) { background: rgba(var(--shadow) / .07); }
+.toolbar-popup .ws-action.on { color: var(--wx-green-dark); background: rgba(7,193,96,.1); }
+.toolbar-popup .ws-action:disabled { opacity: .45; cursor: not-allowed; }
 .ws-action {
   flex: none;
   border: none;
@@ -2116,23 +2109,25 @@ button {
 }
 .control-strip {
   flex: 0 0 auto;
+  max-width: 100%;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
-  padding: 8px 16px;
-  background: var(--surface);
-  border-bottom: 1px solid rgba(var(--shadow) / 0.12);
-  font-size: 13px;
+  padding: 0;
+  font-size: 12px;
 }
-.control-status { color: var(--muted); }
+.control-status { color: var(--muted); max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .control-status.is-owner { color: var(--primary, #07883d); }
 .control-hint { color: var(--muted); }
 .control-request { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
 .control-force { margin-left: auto; }
 .control-strip button:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 600px) {
-  .control-strip { padding: 8px; }
+  .ws-head { gap: 8px; padding-left: 10px; padding-right: 10px; }
+  .ws-head .ws-actions { flex-basis: 100%; justify-content: flex-end; }
+  .control-strip { padding: 0; gap: 6px; }
+  .control-status { max-width: 104px; }
   .control-request { width: 100%; margin-left: 0; }
 }
 

@@ -1,4 +1,5 @@
 import { useEffect, useState, type RefObject } from 'react';
+import { ToolbarMenu } from './ToolbarMenu';
 import { useUI } from './ui';
 
 // Full-desktop-only UI. The application viewer keeps its existing toolbar.
@@ -50,11 +51,14 @@ export function DesktopControls({ id, frameRef, stageRef, frameGen, readOnly, ep
     catch { toast('当前浏览器不允许全屏，请使用浏览器全屏功能', 'error'); }
   };
   return <>
-    <span className="muted small">完整桌面</span>
+    <button className="ws-action" onClick={() => void fullScreen()}>全屏</button>
+    <ToolbarMenu label="桌面操作">
+    <span className="toolbar-group-label">窗口</span>
     <button className="ws-action" disabled={readOnly} onClick={() => void pressKey('super+space')}>应用菜单</button>
     <button className="ws-action" disabled={readOnly} onClick={() => void pressKey('super+d')}>显示桌面</button>
     <button className="ws-action" disabled={readOnly} onClick={() => void pressKey('alt+Tab')}>切换窗口</button>
-    <button className="ws-action" onClick={() => void fullScreen()}>全屏</button>
+    <span className="toolbar-group-label">鼠标</span>
     <button className={'ws-action' + (pointerLocked ? ' on' : '')} disabled={readOnly} onClick={() => void togglePointer()} title="捕获鼠标到远程桌面；按 Esc 释放">{pointerLocked ? '释放鼠标' : '捕获鼠标'}</button>
+    </ToolbarMenu>
   </>;
 }

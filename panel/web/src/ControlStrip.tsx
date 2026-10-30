@@ -20,7 +20,7 @@ export function ControlStrip({ id, status, admin, onChange }: {
     : status.state === 'handover' ? '正在交接 · 只读' : status.state === 'faulted' ? '控制状态待恢复 · 只读'
     : status.mine ? '你正在控制' : status.holder ? `只读 · ${status.holder}正在控制` : '只读 · 暂无操作者';
   return <section className="control-strip" aria-label="桌面控制权">
-    <span className={'control-status' + (status?.mine ? ' is-owner' : '')} role="status">{label}</span>
+    <span className={'control-status' + (status?.mine ? ' is-owner' : '')} role="status" title={label}>{label}</span>
     {status?.mine
       ? <button className="ws-action" disabled={busy} onClick={() => void run(() => api.controlRelease(id))}>交回控制</button>
       : request?.mine
