@@ -1,3 +1,4 @@
+import Automation from "./pages/Automation";
 import Agent from './pages/Agent';
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -145,6 +146,7 @@ export default function AppShell() {
           <Routes>
             <Route path="/" element={<HomeView onOpenMenu={openMenu} onChangePassword={openChangePassword} />} />
             <Route path="/agent" element={<Agent onOpenMenu={openMenu} />} />
+            <Route path="/automation" element={<Automation onOpenMenu={openMenu}/>} />
             <Route path="/admin" element={<Admin onOpenMenu={openMenu} onChangePassword={openChangePassword} />} />
             <Route path="/i/:id" element={<InstanceView onOpenMenu={openMenu} />} />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -196,6 +198,7 @@ function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggl
         {isAdmin && <button className={'sb-item' + (loc.pathname === '/agent' ? ' on' : '')} onClick={() => go('/agent')} title="AI 助手">
           <span className="sb-ic">✦</span>{!collapsed && <span className="sb-label">AI 助手</span>}
         </button>}
+        {isAdmin && <button className={'sb-item'+(loc.pathname==='/automation'?' on':'')} onClick={()=>go('/automation')} title="自动化"><span className="sb-ic">◷</span>{!collapsed&&<span className="sb-label">自动化</span>}</button>}
       </nav>
 
       {!collapsed && <div className="sb-section">实例</div>}

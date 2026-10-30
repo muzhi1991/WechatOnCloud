@@ -1,0 +1,1 @@
+{"name":"woc-trigger","private":true,"type":"module","engines":{"node":">=22.13"},"scripts":{"start":"node src/server.mjs","test":"node --test test/*.test.mjs"},"dependencies":{"@modelcontextprotocol/sdk":"1.32.2","croner":"9.1.0"}}

@@ -1,3 +1,4 @@
+import {registerAutomationRoutes} from "./integrations/automation.js";
 import { registerPaseoAgentRoutes } from './integrations/agent.js';
 import { ControlError } from './control/leases.js';
 import { desktopImage, validateMode, instanceMode } from './desktop.js';
@@ -266,6 +267,7 @@ app.get('/api/agent', async (req, reply) => {
   return { url: url.href };
 });
 registerPaseoAgentRoutes(app);
+registerAutomationRoutes(app,(req,reply)=>!!requireAdmin(req,reply));
 registerCuaRoutes(app, (req, reply) => !!requireAdmin(req, reply));
 registerAgentControlRoutes(app);
 registerReadRoutes(app, {

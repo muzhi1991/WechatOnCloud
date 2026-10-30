@@ -1,3 +1,4 @@
+import AgentDrawer from "../AgentDrawer";
 import { ToolbarMenu } from '../ToolbarMenu';
 import { DesktopControls } from '../DesktopControls';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
@@ -552,6 +553,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const { user } = useAuth();
+  const [aiOpen,setAiOpen]=useState(false);
   const { toast, confirm } = useUI();
   const { instances, loaded, reload } = useInstances();
   const isAdmin = user?.role === 'admin';
@@ -1445,12 +1447,13 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const title = inst?.name || '实例';
 
   return (
-    <div className="ws-page">
+    <div className={"ws-page"+(aiOpen?" ai-open":"")}>
       <header className="ws-head">
         <button className="ws-menu" onClick={onOpenMenu} aria-label="菜单">
           {MenuIcon}
         </button>
         <span className="ws-title">{title}</span>
+        {isAdmin && <button className="ws-action" onClick={()=>setAiOpen(v=>!v)}>AI 助手</button>}
         {showVnc && inst?.controlManaged && id && <ControlStrip id={id} status={control} admin={isAdmin} onChange={setControl} />}
         {showVnc && !inst?.controlManaged && readOnly && <div className="control-strip"><span>只读 · {control?.holder}正在控制</span><button className="ws-action" onClick={takeControl}>申请控制</button></div>}
         {!showVnc && inst?.lifecycleEnabled && <Activity id={id} admin={isAdmin} onVisibilityChange={value => { activityOpen.current = value; }} onBusyChange={value => { maintenanceRequest.current = value; }} />}
@@ -1471,6 +1474,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               {uploading ? `文件 ${uploadPct}` : '文件'}
             </button>
             <ToolbarMenu label="更多">
+              {isAdmin && <button onClick={()=>nav(`/automation?machine=${id}`)}>自动化</button>}
             <span className="toolbar-group-label">输入与剪贴板</span>
             <button
               className={'ws-action' + (inputMode === 'seamless' ? ' on' : '')}
@@ -1527,6 +1531,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           </div>
         )}
       </header>
+      {aiOpen && <AgentDrawer key={id} machineId={id} name={title} onClose={()=>setAiOpen(false)}/>}
 
       {/* —— 各种态 —— */}
       {!loaded || (probing && !inst) ? (

@@ -2768,3 +2768,11 @@ button {
 
 /* Full desktop uses local scaling; browser fullscreen does not mutate remote geometry. */
 .iv-stage--vnc:fullscreen { width: 100vw; height: 100vh; background: #172536; }
+
+/* Shared Paseo iframe, full page or computer-side drawer. */
+.agent-page { height:100%; display:flex; flex-direction:column; min-height:0; }
+.agent-frame { border:0; width:100%; flex:1; min-height:0; }
+.agent-spacer { flex:1; }
+.ws-page.ai-open { padding-right:440px; position:relative; }
+.agent-drawer { position:absolute; right:0; top:0; bottom:0; width:440px; display:flex; flex-direction:column; background:var(--bg); border-left:1px solid var(--border); z-index:30; }
+@media(max-width:1100px){.ws-page.ai-open{padding-right:0}.agent-drawer{width:100%;}}

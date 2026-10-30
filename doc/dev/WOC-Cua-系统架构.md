@@ -228,3 +228,7 @@ AI 助手运行在独立的 `woc-agent` 容器，Paseo 管理会话、历史和 
 `ui_state` 返回页面类型及该页面的 data；`navigate` 只切换已支持的页面，`ui_search` 要求当前范围匹配，`open_item` 只打开刚观察到的项。它们不会隐式寻找任意聊天。客户端脚本依据 wx-cli 的会话/联系人/群组结果解析目标：当前可见就打开，否则在会话页或联系人页搜索，不逐屏滚动。`fill_text` 和 `send_draft` 均核对当前聊天及草稿；客户端编排，daemon 每次执行一个短操作。
 
 内置浏览器扩展增加 `browser_state`、`browser_open_url`，并为 `navigate` 增加 `web_search` 页面；客户端 `open-url` 脚本负责浏览器缺失时的启动及流程编排。实现位于 [wechat_browser.py](../../services/woc-daemon/wechat_browser.py)，真实链路验收见 [浏览器入口调研与实施](WOC-WeChat-内置浏览器入口调研.md)。这些短操作仍遵循同一分层规范。
+
+## 会话默认电脑与通用触发器
+
+新增能力及其部署/状态契约见 [Agent 会话关联电脑与通用自动化](WOC-Agent-会话关联与自动化.md)。默认电脑上下文在 Pi 每次任务开始时注入；不替代锁或 ACL。独立 `woc-trigger` 与 Paseo 同驻 Agent 容器，订阅现有 WOC MCP 或接收 Webhook/定时触发，执行脚本或向 Agent 投递任务；panel 只做认证与薄代理，不承担业务工作流。
