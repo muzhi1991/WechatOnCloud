@@ -1,3 +1,4 @@
+import { ControlError } from './control/leases.js';
 import { desktopImage, validateMode, instanceMode } from './desktop.js';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
@@ -1153,14 +1154,23 @@ app.get('/api/instances/:id/control', async (req, reply) => {
   return { free: false, mine: h.userId === u.id, holder: h.username };
 });
 
-// 无人控制则获得控制；有持有人时提交申请，不能隐式强制接管。
+// 空闲直接获得；人工持锁提交申请；Agent 持锁需确认其当前控制周期。
 app.post('/api/instances/:id/control/take', async (req, reply) => {
   const u = requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const inst = findInstance(id)!;
-  if (managed(inst)) { await ensureControl(inst); return controlRequests.request(id, requestActor(u, req)); }
+  if (managed(inst)) {
+    const confirmedAgentEpoch = (req.body as any)?.agent_epoch;
+    if (confirmedAgentEpoch !== undefined && (typeof confirmedAgentEpoch !== 'string' || !/^[a-f0-9-]{36}$/.test(confirmedAgentEpoch)))
+      return reply.code(400).send({ error: '需要有效的 Agent 控制周期', code: 'WOC_INVALID_ARGUMENT' });
+    await ensureControl(inst);
+    try { return await controlRequests.request(id, requestActor(u, req), false, confirmedAgentEpoch); }
+    catch (e) {
+      return reply.code(e instanceof ControlError ? e.statusCode : 503).send({ code: e instanceof ControlError ? e.code : 'WOC_CONTROL_BLOCKED', error: e instanceof ControlError ? e.message : '控制服务不可用' });
+    }
+  }
   controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now() });
   return { mine: true, holder: u.username };
 });

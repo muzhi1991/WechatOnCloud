@@ -18,7 +18,8 @@ Agent 仍由 Bearer 凭证对应到稳定 client ID；原 Cua、woc-daemon、微
 | --- | --- |
 | 无持有人 | 获得控制权 |
 | 已由本人持有 | 返回本人控制状态 |
-| 被其他人或 Agent 持有 | 创建待处理申请，原持有人继续操作 |
+| 被其他用户持有 | 创建待处理申请，原持有人继续操作 |
+| 被 Agent 持有，网页人工申请 | 显示 Agent 名称并询问是否接管；取消无动作，确认后交接 |
 | 已有其他申请 | 提示已有待处理申请 |
 | 交接/维护/故障 | 返回当前不可申请的条件 |
 
@@ -26,14 +27,16 @@ Agent 仍由 Bearer 凭证对应到稳定 client ID；原 Cua、woc-daemon、微
 
 申请人可取消。拒绝、取消、超时、权限撤销或控制权变化使申请失效，不自动给别人控制权。释放后新申请可以取得空闲机器；未获批的旧申请不自动接续。面板重启清空锁与待处理申请，不需要持久化新数据库。
 
-管理员只有点击独立的“强制接管”并确认才走 force 路径；服务端也校验管理员角色。管理员点击普通“申请控制”一样需要持有人同意。普通用户不能强制接管，也不能因为是管理员就代替当前持有人点击批准；管理员需要使用明确的 force 操作。
+当持有人是其他用户时，管理员只有点击独立的“强制接管”并确认才走 force 路径；服务端也校验管理员角色。管理员点击普通“申请控制”一样需要该用户同意，普通用户不能强制接管其他用户。
+
+当持有人是 Agent 时，有该机器访问权限的网页用户点击“申请控制”，先读取最新状态，再弹出包含 Agent 名称的接管确认框。取消仅关闭弹窗，不提交申请、不改变锁。确认携带弹窗对应的 `agent_epoch`；服务端核对当前仍是同一次 Agent 控制周期后，通过既有交接逻辑撤销旧 GUI 写权限、等待在途操作结束，再授予人工。此路径不要求管理员身份，也不需要 Agent 审批；界面不再额外展示重复的管理员强制接管按钮。弹窗期间即使同一个 Agent 释放又重新获锁，也必须重新确认。
 
 ## 接口与未来 Agent 接入
 
 | Web HTTP | 行为 |
 | --- | --- |
 | GET /api/instances/:id/control | 原锁状态，新增可空 request 摘要 |
-| POST /api/instances/:id/control/take | 申请；不再默认 force |
+| POST /api/instances/:id/control/take | 普通申请；确认接管 Agent 时携带 `{agent_epoch}` |
 | POST /api/instances/:id/control/respond | `{request_id, approve}`；持有人 + 当前 epoch |
 | POST /api/instances/:id/control/cancel | `{request_id}`；仅申请人 |
 | POST /api/instances/:id/control/force | 仅管理员明确强制接管 |
@@ -41,7 +44,7 @@ Agent 仍由 Bearer 凭证对应到稳定 client ID；原 Cua、woc-daemon、微
 
 request 摘要包括 id、label、kind、expiresAt、mine、canRespond。网页复用原 3 秒状态轮询，无新增推送连接。待处理状态与原锁的 handover/pending 区分，申请不会把正在操作的人切到只读。
 
-核心 [ControlRequests](../../panel/server/src/control/requests.ts) 接受通用 Actor（human/agent），依赖注入机器权限检查。已测试“人同意 Agent 后交接”的内部路径。当前生产入口只开放网页人工申请，运行时权限解析也只接人工；**未新增 Agent 主动申请或处理申请的 MCP 工具**。后续在既有 WOC MCP/HTTP 适配器接入该模型与 Agent ACL 即可，原 acquire 的立即获锁/忙错误语义不变。当前 Agent 持锁时也尚无 MCP 审批入口；网页申请不会强占它，实际交接需 Agent 交回或管理员明确强制接管。未处理申请仍按 60 秒失效，不自动批准。
+核心 [ControlRequests](../../panel/server/src/control/requests.ts) 接受通用 Actor（human/agent），依赖注入机器权限检查。已测试“人同意 Agent 后交接”的内部路径。当前生产入口只开放网页人工申请，运行时权限解析也只接人工；**未新增 Agent 主动申请或处理申请的 MCP 工具**。后续在既有 WOC MCP/HTTP 适配器接入该模型与 Agent ACL 即可，原 acquire 的立即获锁/忙错误语义不变。Agent 持锁时，网页人工通过上述确认接管，不依赖 MCP 审批入口。未处理的人工交接申请仍按 60 秒失效，不自动批准。
 
 代码入口：[身份](../../panel/server/src/control/actors.ts)、[申请 HTTP](../../panel/server/src/control/request-routes.ts)、[锁交接](../../panel/server/src/control/leases.ts)、[网页控制栏](../../panel/web/src/ControlStrip.tsx)。
 
@@ -49,7 +52,7 @@ request 摘要包括 id、label、kind、expiresAt、mine、canRespond。网页�
 
 移除桌面中央申请卡片、遮暗和模糊。画面上方的独立控制栏显示“只读 / 谁正在控制 / 申请控制”；只读画面只保留透明输入拦截和禁用鼠标样式，服务端仍强制拒绝未经授权的输入，不能只靠前端遮罩。
 
-收到申请时在控制栏内显示申请人和同意/拒绝按钮，不弹模态对话框、不自动聚焦、不盖住桌面。申请者可看到等待状态和取消按钮。管理员强制接管是主动操作，另外显示确认框；不会因为收到申请而弹出这个框。
+收到申请时在控制栏内显示申请人和同意/拒绝按钮，不弹模态对话框、不自动聚焦、不盖住桌面。申请者可看到等待状态和取消按钮。管理员强制接管其他用户，以及网页用户接管 Agent，均是在申请者主动点击后显示确认框；不会因为收到申请而弹出这个框。
 
 人工页面每 5 秒发送连接心跳，默认 30 秒收不到心跳则交回。新增独立的人工操作空闲期限，默认 300 秒（5 分钟）。心跳、刷新、查询、重复申请不更新操作时间；桌面 iframe 内可信的键盘、鼠标移动/按下、滚轮、触摸及输入条操作才上报活动，受管 HTTP GUI 写操作也计入。活动上报按 2.5 秒节流，未发送活动保留至下一心跳，绑定当前 epoch，服务端以收到活动的时间计时（允许几秒传输/节流误差）。过期请求不能恢复原锁。
 
@@ -85,3 +88,11 @@ Agent 稳定客户端锁默认 120 秒无 GUI 写操作交回，查询/截图不
 当前面板镜像为 `local/woc-panel:control-timeouts-v2` / `sha256:a6db2c70ea09b743e49f308391e4c99758d071599b3bd05415f32ac8e3728dce`，只重建面板；微信、浏览器、完整桌面及独立 cua-worker-01 容器未重建。部署前备份在私有 `/root/woc-ui-private/control-timeouts-before/`。如需回滚，在控制空闲时恢复其中 panel.env 并重建面板；旧版本忽略新增设置字段，恢复旧的仅心跳人工超时行为。
 
 最终 v2 镜像重建后已再次核对：持久化默认值仍为 30/300/120；设置页面显示正确，三台受管机器空闲。原真实 Chrome 多用户交接脚本重新通过全部场景（同用户刷新/多页、只读无遮挡、申请无抢占/无焦点打断、取消/拒绝/同意、管理员明确接管、子账号权限检查），临时子账号已删除。
+
+### 2026-10-30 Agent 接管确认验收
+
+38 项控制测试、前后端 TypeScript 检查和网页生产构建通过。新增测试覆盖未确认不抢占、同一 Agent 新控制周期使旧确认失效、不能误接管新人工持有人，以及在途 Agent 输入完成后才交接、拒绝旧周期后续写入。
+
+真实 Chrome 在完整桌面 dfde788ec9 使用稳定 mac-agent 凭证和临时普通用户验收：弹窗显示 Agent 名称；取消时没有 POST take、没有待处理申请且原锁不变；缺少确认的直接 HTTP 返回 WOC_AGENT_CONFIRMATION_REQUIRED；非管理员确认后接管成功；旧 Agent 释放请求被拒绝；弹窗期间 Agent 重新获锁，旧确认返回 WOC_CONTROL_CHANGED。人工之间的原真实浏览器协商验收也全部通过。测试账户和锁已清理，私有脚本及截图在 ignored artifacts/agent-takeover/。
+
+只更新统一面板，镜像 local/woc-panel:agent-takeover-confirm-v1 / sha256:805ecbcba858ae925dcf61eaaf31f678ec3fab7282b1564d08e7297f13902158。应用容器未重建，微信进程未重启。部署前配置及容器状态备份在私有 /root/woc-ui-private/agent-takeover-confirm-v1/；回滚时在控制空闲后恢复其中 panel.env 并重建 panel 即可。原 Cua MCP、Skill、daemon 和远端 Agent/shell 权限边界保持不变；接管只撤销受管 GUI 写权限。

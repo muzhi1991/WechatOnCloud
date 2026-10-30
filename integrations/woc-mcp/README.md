@@ -36,8 +36,10 @@ saves the global Control timeouts settings in the panel (Management → System).
 The saved Agent idle value takes precedence and is reported by `idle_timeout_ms`. Only admitted GUI
 writes renew a managed client lock. Reading, repeated acquire, commands and agent
 calls do not. Human web ownership uses the authenticated user ID across tabs. Ordinary web
-requests need the current holder’s approval; only administrators may explicitly
-force takeover. Human web leases expire after either missing heartbeats (default 30 seconds) or
+requests to another human need that holder’s approval; only administrators may explicitly
+force takeover from another human. When an agent owns the lock, an authorized web user
+gets a named confirmation before takeover. Cancel sends no takeover request; confirmation
+is bound to that exact agent ownership period and fails if ownership has changed. Human web leases expire after either missing heartbeats (default 30 seconds) or
 no actual desktop input (default 300 seconds). Heartbeats never renew input activity.
 All three timeouts are persisted and configurable, with changes applying immediately. The generic request
 model is ready for agents, but agent request/approval MCP tools are not exposed yet.

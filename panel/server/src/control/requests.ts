@@ -24,9 +24,18 @@ export class ControlRequests {
     return { ...status, request: request ? { id: request.id, label: request.requester.label, kind: request.requester.kind,
       expiresAt: request.expiresAt, mine: same(request.requester, actor), canRespond: status.mine } : null };
   }
-  async request(machine: string, actor: Actor, idleManaged = actor.kind === 'agent') {
+  async request(machine: string, actor: Actor, idleManaged = actor.kind === 'agent', confirmedAgentEpoch?: string) {
     if (!this.canAccess(machine, actor)) throw new ControlError('无权操作该实例', 403);
     const status = this.leases.status(machine, actor);
+    if (confirmedAgentEpoch !== undefined) {
+      if (actor.kind !== 'human' || status.state !== 'agent' || status.epoch !== confirmedAgentEpoch)
+        throw new ControlError('操作者已变化，请重新查看控制状态并申请', 409, 'WOC_CONTROL_CHANGED');
+      // Check and start the existing drain/transfer synchronously, before any await.
+      await this.leases.take(machine, actor, true, idleManaged);
+      return this.status(machine, actor);
+    }
+    if (actor.kind === 'human' && status.state === 'agent')
+      throw new ControlError(`${status.holder} 正在操作，请确认后接管`, 409, 'WOC_AGENT_CONFIRMATION_REQUIRED');
     if (status.free || status.mine) {
       await this.leases.take(machine, actor, false, idleManaged);
       return this.status(machine, actor);

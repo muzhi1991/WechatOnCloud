@@ -52,3 +52,25 @@ test('generic approved agent transfer drains current input before granting owner
   finish();await action;await approve;assert.equal(l.status('a',agent).mine,true);
   assert.equal(l.client('a',agent).epoch,l.status('a').epoch);
 });
+
+test('human confirms the exact agent period; no confirmation or stale confirmation never takes control',async()=>{
+  const {l,r}=await fixture();const first=await l.take('a',agent,false,true);
+  await assert.rejects(r.request('a',owner),{code:'WOC_AGENT_CONFIRMATION_REQUIRED'});
+  assert.equal(l.status('a',agent).epoch,first.epoch);assert.equal(r.status('a',owner).request,null);
+  await l.release('a',agent,first.epoch);const second=await l.take('a',agent,false,true);
+  await assert.rejects(r.request('a',owner,false,first.epoch),{code:'WOC_CONTROL_CHANGED'});
+  assert.equal(l.status('a',agent).epoch,second.epoch);
+  const confirmed=await r.request('a',owner,false,second.epoch);assert.equal(confirmed.mine,true);
+  await assert.rejects(r.request('a',other,false,second.epoch),{code:'WOC_CONTROL_CHANGED'});
+  assert.equal(l.status('a',owner).mine,true);
+  const pending=await r.request('a',other);assert.ok(pending.request);assert.equal(pending.mine,false);
+});
+
+test('confirmed human takeover drains agent input and invalidates subsequent agent writes',async()=>{
+  const {l,r}=await fixture();const initial=await l.take('a',agent,false,true);
+  let finish!:()=>void;const action=l.write('a',agent,initial.epoch,()=>new Promise<void>(done=>{finish=done;}));
+  const taking=r.request('a',owner,false,initial.epoch);
+  assert.equal(l.status('a').state,'handover');assert.equal(l.status('a',owner).mine,false);
+  await assert.rejects(l.write('a',agent,initial.epoch,async()=>{}));
+  finish();await action;await taking;assert.equal(l.status('a',owner).mine,true);
+});

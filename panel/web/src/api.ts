@@ -1,6 +1,7 @@
 export interface ControlRequest { id: string; label: string; kind: 'human' | 'agent'; expiresAt: number; mine: boolean; canRespond: boolean }
 export type ControlTimeouts = { disconnectSeconds: number; humanIdleSeconds: number; agentIdleSeconds: number };
 export interface ControlStatus {
+  kind?: 'human' | 'agent' | null;
   request?: ControlRequest | null;
   free: boolean; mine: boolean; holder: string | null; managed?: boolean;
   state?: 'idle' | 'human' | 'agent' | 'handover' | 'faulted' | 'maintenance'; epoch?: string; pending?: boolean;
@@ -485,7 +486,7 @@ export const api = {
   controlTimeouts: () => req<ControlTimeouts>('/api/control-timeouts'),
   setControlTimeouts: (value: ControlTimeouts) => req<ControlTimeouts>('/api/admin/control-timeouts', { method: 'POST', body: JSON.stringify(value) }),
   controlBeat: (id: string, activity = false) => req<ControlStatus>(`/api/instances/${id}/control/beat`, { method: 'POST', body: JSON.stringify({ activity }) }),
-  controlTake: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/take`, { method: 'POST' }),
+  controlTake: (id: string, agentEpoch?: string) => req<ControlStatus>(`/api/instances/${id}/control/take`, { method: 'POST', ...(agentEpoch ? { body: JSON.stringify({ agent_epoch: agentEpoch }) } : {}) }),
   controlRespond: (id: string, request_id: string, approve: boolean) => req<ControlStatus>(`/api/instances/${id}/control/respond`, { method: 'POST', body: JSON.stringify({ request_id, approve }) }),
   controlCancel: (id: string, request_id: string) => req<ControlStatus>(`/api/instances/${id}/control/cancel`, { method: 'POST', body: JSON.stringify({ request_id }) }),
   controlForce: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/force`, { method: 'POST' }),
