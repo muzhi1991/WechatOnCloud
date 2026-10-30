@@ -4,6 +4,7 @@ import Cropper from 'react-easy-crop';
 import { api, APP_LABELS, appProfile, fmtUploadSize, provisionProgressText, type PanelUser, type InstanceWithStatus, type VolEntry, type AppType, type VersionInfo } from '../api';
 import { InstanceIcon, ICON_CHOICES } from '../AppIcon';
 import { useUI, PasswordInput } from '../ui';
+import { ControlTimeoutSettings } from './ControlTimeoutSettings';
 import { useAuth } from '../auth';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
@@ -792,6 +793,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
           </>
         )}
 
+        {(!isAdmin || tab === 'system') && <ControlTimeoutSettings isAdmin={isAdmin} />}
         {isAdmin && tab === 'system' && <DiagnosticsSection />}
         {(!isAdmin || tab === 'system') && <AboutSection isAdmin={isAdmin} />}
       </main>

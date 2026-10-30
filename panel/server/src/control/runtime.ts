@@ -3,7 +3,7 @@ import type { Socket } from 'node:net';
 import type { FastifyRequest } from 'fastify';
 import { cuaRegistry } from '../cua/registry.js';
 import { cuaConfig } from '../cua/config.js';
-import { findInstance, findById, userCanAccess, listInstances, type Instance, type User } from '../store.js';
+import { getSettings, findInstance, findById, userCanAccess, listInstances, type Instance, type User } from '../store.js';
 import { controlExec, controlPauseApp, instanceRuntime, cuaInstanceStatus, controlRuntimeIdentity } from '../docker.js';
 import { ControlLeases, ControlError, type Actor } from './leases.js';
 import { createControlGateway } from './gateway.js';
@@ -16,12 +16,15 @@ import { lifecycleEnabled, journal, maintenanceState, configureMaintenance, with
 export const controlEnabled = process.env.WOC_CONTROL_ENABLED === '1';
 const idleMs = Number(process.env.WOC_CONTROL_IDLE_MS || 120_000);
 if (!Number.isFinite(idleMs) || idleMs < 1000 || idleMs > 3_600_000) throw new Error('WOC_CONTROL_IDLE_MS must be 1000..3600000');
+export const controlTimeouts = () => getSettings().controlTimeouts || {
+  disconnectSeconds: 30, humanIdleSeconds: 300, agentIdleSeconds: idleMs / 1000,
+};
 export const leases = new ControlLeases(Date.now, 30_000, {
   grant: (id, actor, epoch, generation) => { if (actor.kind === 'agent') journal?.start(id, 'task', actor.label, { epoch, details: { generation } }); },
   end: (id, epoch, reason) => journal?.endTask(id, epoch, reason),
   action: (id, actor, epoch, name) => journal?.start(id, 'action', name, { epoch, parent: journal.task(id, epoch), details: { actor: actor.kind } }),
   result: (action, ok) => journal?.finish(action, ok ? 'done' : 'uncertain', ok ? undefined : 'inspect-before-retry'),
-}, idleMs);
+}, idleMs, controlTimeouts);
 // Web requests currently originate from authenticated humans. Agent requests can
 // use the same model once a client-facing request API and ACL resolver are added.
 export const controlRequests = new ControlRequests(leases, (machine, actor) => {

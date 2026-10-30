@@ -31,11 +31,15 @@ token in a client file with mode `0600`. Only the SHA-256 digest belongs on the
 server. `machines: ["*"]` explicitly grants access to this panel's current and
 future managed instances; use a fixed list for restricted clients.
 
-`WOC_CONTROL_IDLE_MS` defaults to 120000 (range 1000–3600000). Only admitted GUI
+`WOC_CONTROL_IDLE_MS` defaults to 120000 (range 1000–3600000) until an administrator
+saves the global Control timeouts settings in the panel (Management → System).
+The saved Agent idle value takes precedence and is reported by `idle_timeout_ms`. Only admitted GUI
 writes renew a managed client lock. Reading, repeated acquire, commands and agent
 calls do not. Human web ownership uses the authenticated user ID across tabs. Ordinary web
 requests need the current holder’s approval; only administrators may explicitly
-force takeover. Existing heartbeat timeouts remain unchanged. The generic request
+force takeover. Human web leases expire after either missing heartbeats (default 30 seconds) or
+no actual desktop input (default 300 seconds). Heartbeats never renew input activity.
+All three timeouts are persisted and configurable, with changes applying immediately. The generic request
 model is ready for agents, but agent request/approval MCP tools are not exposed yet.
 
 The same stable credential is used to register the gateway URL in original Cua

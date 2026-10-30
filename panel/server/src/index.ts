@@ -15,6 +15,8 @@ import { watchdogDecision } from './lifecycle/watchdog.js';
 import { registerClientControlRoutes } from './control/client-routes.js';
 import { registerReadRoutes } from './business/routes.js';
 import { registerUiRoutes } from './business/ui-routes.js';
+import { registerTimeoutRoutes } from './control/timeout-routes.js';
+import { controlTimeouts } from './control/runtime.js';
 import { registerControlRequestRoutes } from './control/request-routes.js';
 import { controlRequests } from './control/runtime.js';
 import { registerAgentControlRoutes } from './control/routes.js';
@@ -50,6 +52,7 @@ import {
   publicInstance,
   getDesktopDark,
   setDesktopDark,
+  setControlTimeouts,
   APP_TYPES,
   type AppType,
   type User,
@@ -440,6 +443,11 @@ app.post('/api/admin/desktop-theme', async (req, reply) => {
   setDesktopDark(dark);
   appendPanelLog('INFO', `实例深色设为 ${dark ? '深色' : '浅色'}（浏览器实例重启后生效）`);
   return { ok: true, dark };
+});
+
+registerTimeoutRoutes(app, {
+  authorize: (req, reply, write) => !!(write ? requireAdmin(req, reply) : requireAuth(req, reply)),
+  get: controlTimeouts, set: value => { leases.tick(); setControlTimeouts(value); leases.tick(); },
 });
 
 // ---------- 自助改密 ----------
@@ -1120,7 +1128,7 @@ app.post('/api/instances/:id/control/beat', async (req, reply) => {
   if (managed(inst)) {
     await ensureControl(inst);
     const actor = requestActor(u, req), status = leases.status(id, actor);
-    if (status.mine) leases.renew(id, actor, requestEpoch(req));
+    if (status.mine) leases.renew(id, actor, requestEpoch(req), (req.body as any)?.activity === true);
     return controlRequests.status(id, actor);
   }
   const now = Date.now();

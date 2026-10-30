@@ -1,4 +1,5 @@
 export interface ControlRequest { id: string; label: string; kind: 'human' | 'agent'; expiresAt: number; mine: boolean; canRespond: boolean }
+export type ControlTimeouts = { disconnectSeconds: number; humanIdleSeconds: number; agentIdleSeconds: number };
 export interface ControlStatus {
   request?: ControlRequest | null;
   free: boolean; mine: boolean; holder: string | null; managed?: boolean;
@@ -481,7 +482,9 @@ export const api = {
 
   // 多端协作：操作控制权
   controlStatus: (id: string) => req<ControlStatus>(`/api/instances/${id}/control`),
-  controlBeat: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/beat`, { method: 'POST' }),
+  controlTimeouts: () => req<ControlTimeouts>('/api/control-timeouts'),
+  setControlTimeouts: (value: ControlTimeouts) => req<ControlTimeouts>('/api/admin/control-timeouts', { method: 'POST', body: JSON.stringify(value) }),
+  controlBeat: (id: string, activity = false) => req<ControlStatus>(`/api/instances/${id}/control/beat`, { method: 'POST', body: JSON.stringify({ activity }) }),
   controlTake: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/take`, { method: 'POST' }),
   controlRespond: (id: string, request_id: string, approve: boolean) => req<ControlStatus>(`/api/instances/${id}/control/respond`, { method: 'POST', body: JSON.stringify({ request_id, approve }) }),
   controlCancel: (id: string, request_id: string) => req<ControlStatus>(`/api/instances/${id}/control/cancel`, { method: 'POST', body: JSON.stringify({ request_id }) }),

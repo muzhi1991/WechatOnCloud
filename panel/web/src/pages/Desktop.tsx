@@ -666,6 +666,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const stageRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const lastBeat = useRef(0);
+  const pendingActivity = useRef<string | undefined>();
+  useEffect(() => { lastBeat.current = 0; pendingActivity.current = undefined; }, [id, control?.epoch]);
   const audioRef = useRef<VncAudio | null>(null);
   const recovering = useRef(false); // 致命崩溃自愈进行中（防错误浮层轮询与 error 事件重复触发重载）
   // 浏览器扩展注入脚本的报错（见 fatalErrorMsg）：只关浮层不重连；每次页面加载只记一条，避免 3s 轮询刷日志
@@ -825,15 +827,20 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     };
   }, [showVnc, id]);
 
-  // 续约控制权，节流 2.5s。桌面画面里的真实操作、底部输入条里打字都算（输入条不经过画面，此前不续约，
-  // 连着打一会儿字控制权就被别人拿走）。空闲不操作则超时自动释放。
-  const beat = useCallback(async () => {
+  // Connection heartbeats never imply input. Keep throttled activity until the next beat,
+  // bound to its ownership epoch so stale tabs cannot renew a new lease's activity.
+  const beat = useCallback(async (activity = false) => {
     if (!id) return;
+    const current = controlState.current;
+    if (activity && current?.mine) pendingActivity.current = current.epoch;
     const now = Date.now();
     if (now - lastBeat.current < 2500) return;
     lastBeat.current = now;
     try {
-      const r = await api.controlBeat(id);
+      const epoch = current?.epoch;
+      const active = !!current?.mine && !!epoch && pendingActivity.current === epoch;
+      pendingActivity.current = undefined;
+      const r = await api.controlBeat(id, active);
       setControl({ ...r, free: r.free ?? false });
     } catch {
       /* ignore */
@@ -842,7 +849,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
   const readOnly = inst?.controlManaged ? !control?.mine : !!control && !control.free && !control.mine; // 别人在操作：只读
   useEffect(() => {
     if (!inst?.controlManaged || !control?.mine) return;
-    const timer = window.setInterval(() => { if (!document.hidden) void beat(); }, 5000);
+    const timer = window.setInterval(() => { void beat(); }, 5000);
     return () => window.clearInterval(timer);
   }, [inst?.controlManaged, control?.mine, beat]);
 
@@ -852,8 +859,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     if (!showVnc || !id || !frameLoaded) return;
     const win = frameRef.current?.contentWindow;
     if (!win) return;
-    const onInteract = () => void beat();
-    const evs = ['mousedown', 'keydown', 'wheel'] as const;
+    const onInteract = (event: Event) => { if (event.isTrusted && controlState.current?.mine) void beat(true); };
+    const evs = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
     try {
       evs.forEach((e) => win.addEventListener(e, onInteract, { capture: true, passive: true }));
     } catch {
@@ -1854,9 +1861,9 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                   className="iv-imebar-input"
                   value={imeText}
                   disabled={readOnly}
-                  onChange={(e) => setImeText(e.target.value)}
+                  onChange={(e) => { setImeText(e.target.value); void beat(true); }}
                   onKeyDown={(e) => {
-                    void beat();
+                    void beat(true);
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       sendImeText();

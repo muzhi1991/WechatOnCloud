@@ -74,6 +74,7 @@ export interface Settings {
   // 实例桌面深色模式：由面板顶栏的主题开关统一控制（管理员）。true=实例内应用走深色。
   // 既作为新建/重启实例的初始明暗（经容器环境 WOC_DARK 下发），也用于对运行中实例实时切换。
   desktopDark?: boolean;
+  controlTimeouts?: import('./control/leases.js').ControlTimeouts;
 }
 
 interface Data {
@@ -152,6 +153,11 @@ export function initStore() {
 // ---------- 全局设置 ----------
 export function getSettings(): Settings {
   return data.settings || (data.settings = {});
+}
+
+export function setControlTimeouts(value: import('./control/leases.js').ControlTimeouts) {
+  getSettings().controlTimeouts = { ...value };
+  persist();
 }
 
 export function getDesktopDark(): boolean {

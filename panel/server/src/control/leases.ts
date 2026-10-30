@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
+export type ControlTimeouts = { disconnectSeconds: number; humanIdleSeconds: number; agentIdleSeconds: number };
 export type Actor = { kind: 'human' | 'agent'; id: string; label: string };
 export interface ControlAdapter {
   revoke(): Promise<void>; // Revoke Kasm write access AND close old writable sockets.
@@ -18,7 +19,7 @@ export class ControlError extends Error {
 }
 type Entry = {
   generation: number; epoch: string; state: 'idle' | 'human' | 'agent' | 'handover' | 'faulted';
-  idleManaged: boolean; expiredOwner?: string; owner?: Actor; token?: string; password?: string; expires: number; inflight: number;
+  idleManaged: boolean; expiredOwner?: string; owner?: Actor; token?: string; password?: string; expires: number; lastBeat: number; lastActivity: number; inflight: number;
   uncertain: boolean; initialized: boolean; retired: boolean; adapter: ControlAdapter; transition?: Promise<void>; drain: Set<() => void>;
   lane: { tail: Promise<void> };
 };
@@ -28,14 +29,23 @@ type Entry = {
 export class ControlLeases {
   private entries = new Map<string, Entry>();
   private holds = new Map<string, string>();
-  constructor(private readonly now = Date.now, readonly ttlMs = 30_000, private observer: ControlObserver = {}, readonly idleMs = 120_000) {}
+  constructor(private readonly now = Date.now, private defaultTtlMs = 30_000, private observer: ControlObserver = {}, private defaultIdleMs = 120_000,
+    private policy?: () => ControlTimeouts) {}
+  get ttlMs() { return this.policy ? this.policy().disconnectSeconds * 1000 : this.defaultTtlMs; }
+  get idleMs() { return this.policy ? this.policy().agentIdleSeconds * 1000 : this.defaultIdleMs; }
+  private deadline(e: Entry) {
+    if (!e.owner) return 0;
+    if (e.idleManaged) return e.lastActivity + this.idleMs;
+    const connection = e.lastBeat + this.ttlMs;
+    return e.owner.kind === 'human' ? Math.min(connection, e.lastActivity + (this.policy?.().humanIdleSeconds ?? 300) * 1000) : connection;
+  }
   async ensure(id: string, generation: number, adapter: ControlAdapter, replace = false, duringMaintenance = false) {
     if (this.holds.has(id) && !duringMaintenance) return;
     let e = this.entries.get(id);
     if (!replace && e?.generation === generation) { if (!e.initialized) await e.transition; return; }
     if (e) { const oldEpoch = e.epoch; e.retired = true; e.uncertain = true; e.owner = undefined; e.token = undefined; e.state = 'faulted'; e.epoch = randomUUID(); this.observer.end?.(id, oldEpoch, 'generation-changed'); }
     const lane = e?.lane || { tail: Promise.resolve() };
-    e = { generation, epoch: randomUUID(), idleManaged: false, state: 'handover', expires: 0, inflight: 0, uncertain: false, initialized: false, retired: false, adapter, drain: new Set(), lane };
+    e = { generation, epoch: randomUUID(), idleManaged: false, state: 'handover', expires: 0, lastBeat: 0, lastActivity: 0, inflight: 0, uncertain: false, initialized: false, retired: false, adapter, drain: new Set(), lane };
     this.entries.set(id, e);
     e.transition = this.initialize(e);
     await e.transition;
@@ -65,6 +75,7 @@ export class ControlLeases {
     if (this.holds.has(id)) return { managed: true, state: 'maintenance', epoch: '', generation: this.entries.get(id)?.generation || 0,
       free: false, mine: false, holder: null, kind: null, expiresAt: 0, inflight: this.entries.get(id)?.inflight || 0, pending: true, reason: this.holds.get(id) };
     const e = this.get(id);
+    e.expires = this.deadline(e);
     if (e.owner && this.now() >= e.expires && !(e.idleManaged && e.inflight)) this.begin(e, undefined, 'expired');
     return { managed: true, state: e.state, epoch: e.epoch, generation: e.generation,
       free: e.state === 'idle', mine: this.same(e.owner, actor), holder: e.owner?.label || null,
@@ -98,7 +109,8 @@ export class ControlLeases {
         if (next?.id === e.expiredOwner) e.expiredOwner = undefined;
         e.owner = next; e.state = next?.kind || 'idle';
         e.token = next?.kind === 'agent' ? randomBytes(32).toString('hex') : undefined;
-        e.expires = next ? this.now() + (e.idleManaged ? this.idleMs : this.ttlMs) : 0;
+        e.lastBeat = e.lastActivity = this.now();
+        e.expires = this.deadline(e);
       } catch { e.state = 'faulted'; e.uncertain = true; e.owner = undefined; e.token = undefined; }
     })();
   }
@@ -107,7 +119,7 @@ export class ControlLeases {
     const e = this.get(id); this.status(id);
     if (e.state === 'faulted') throw new ControlError('输入状态不确定，请管理员恢复控制服务', 409, 'WOC_CONTROL_BLOCKED');
     if (e.state === 'handover') return this.status(id, actor);
-    if (this.same(e.owner, actor)) { if (!e.idleManaged) e.expires = this.now() + this.ttlMs; return this.grant(id, actor); }
+    if (this.same(e.owner, actor)) { if (!e.idleManaged) e.lastBeat = this.now(); return this.grant(id, actor); }
     if (e.owner && !force) throw new ControlError('桌面已有操作者，请等待其交回控制', 409, 'WOC_LOCK_BUSY');
     if (force && actor.kind !== 'human') throw new ControlError('Agent 不能抢占人工控制');
     e.idleManaged = idleManaged;
@@ -132,8 +144,11 @@ export class ControlLeases {
   private grant(id: string, actor: Actor) {
     const e = this.get(id); return { ...this.status(id, actor), ...(this.same(e.owner, actor) && e.token ? { token: e.token } : {}) };
   }
-  renew(id: string, actor: Actor, epoch: string) {
-    const e = this.check(id, actor, epoch); e.expires = this.now() + this.ttlMs; return this.status(id, actor);
+  renew(id: string, actor: Actor, epoch: string, activity = false) {
+    const e = this.check(id, actor, epoch);
+    e.lastBeat = this.now();
+    if (activity && actor.kind === 'human') e.lastActivity = this.now();
+    return this.status(id, actor);
   }
   async release(id: string, actor: Actor, epoch: string) {
     const e = this.check(id, actor, epoch); this.begin(e, undefined, 'released'); await e.transition; return this.status(id, actor);
@@ -168,11 +183,11 @@ export class ControlLeases {
     const e = this.check(id, actor, epoch);
     if (e.inflight) throw new ControlError('上一操作尚未结束');
     const record = this.observer.action?.(id, actor, epoch, name);
-    if (e.idleManaged) e.expires = this.now() + this.idleMs;
+    if (e.idleManaged || actor.kind === 'human') e.lastActivity = this.now();
     e.inflight++;
     try {
       const result = await action(() => { if (e.retired) throw new ControlError('原操作已中断，不能向新的桌面继续输入'); });
-      if (e.idleManaged && e.epoch === epoch && this.same(e.owner, actor)) e.expires = this.now() + this.idleMs;
+      if (e.idleManaged && e.epoch === epoch && this.same(e.owner, actor)) e.lastActivity = this.now();
       if (record) this.observer.result?.(record, true);
       return result;
     }
