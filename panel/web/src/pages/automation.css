@@ -4,3 +4,5 @@
 .auto-editor .auto-toggle{flex-direction:row;justify-content:flex-start}
 
 .auto-editor-form{display:flex;flex-direction:column;gap:16px}
+
+.auto-argument-helper summary{cursor:pointer;font-size:13px;color:var(--muted);padding:4px 0}.auto-argument-helper[open]>div{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:6px}
