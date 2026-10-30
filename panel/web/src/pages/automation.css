@@ -2,3 +2,5 @@
 /* Keep the automation editor wider than the shared confirmation modal. */
 .modal.auto-editor{width:min(640px,calc(100vw - 24px));max-width:640px}
 .auto-editor .auto-toggle{flex-direction:row;justify-content:flex-start}
+
+.auto-editor-form{display:flex;flex-direction:column;gap:16px}

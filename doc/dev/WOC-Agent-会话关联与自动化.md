@@ -40,7 +40,7 @@ UI：会话顶部可选默认电脑；电脑页点 AI 助手，优先打开最�
 
 ## 自动化
 
-WOC `/automation` 管理触发器，支持间隔、每日时间/Cron（含时区）、MCP 资源更新、Webhook。动作是脚本或投递给已有 Agent 会话。界面保留高级脚本参数；“微信消息检查”模板负责选电脑、会话/联系人/群、目标 Agent、任务文字，首次只建基线。
+WOC `/automation` 管理触发器，支持间隔、每日时间/Cron（含时区）、MCP 资源更新、Webhook。动作是脚本或投递给已有 Agent 会话。界面统一通过“新建”入口配置；弹窗内可选“微信消息检查”预置模板，选择电脑、会话/联系人/群、目标 Agent 和任务文字后，套用为普通 MCP 资源更新 + 脚本动作。模板不创建独立任务类型，生成后可继续修改通用配置，默认停用；首次执行只建基线。既有自动化直接用通用表单编辑，保留脚本参数。
 
 执行、队列与状态属于 `services/woc-trigger`，面板 `integrations/automation.ts` 只代理。Agent 可通过 `integrations/skills/woc-automation/SKILL.md` 和 CLI 管理同一套配置。脚本也可调用 `agent send`；这不是新增权限，GUI 写入仍在后续 Agent/Skill 处经过原网关锁检查。
 
