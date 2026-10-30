@@ -70,6 +70,7 @@
 | [数据卷管理与迁移](doc/数据卷管理.md) | 管理员在面板里备份/恢复整卷、上传 PC 微信数据、浏览管理实例 /config 文件 |
 | [发布到 GHCR](doc/发布到GHCR.md) | 用 GitHub Actions 或本机 buildx 把镜像发布到 GHCR |
 | [技术方案](doc/技术方案.md) | 完整设计文档与选型权衡 |
+| [WOC 应用操作开发规则](doc/dev/WOC-应用操作开发规则.md) | 新增操作前必读：daemon、网关/MCP、Skill 脚本和 Agent 的职责边界 |
 
 ---
 
