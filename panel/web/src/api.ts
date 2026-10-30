@@ -2,10 +2,22 @@ export interface ControlStatus {
   free: boolean; mine: boolean; holder: string | null; managed?: boolean;
   state?: 'idle' | 'human' | 'agent' | 'handover' | 'faulted' | 'maintenance'; epoch?: string; pending?: boolean;
 }
-// Generated per page load (including two tabs sharing the same login cookie).
-const clientBytes = crypto.getRandomValues(new Uint8Array(16));
-const clientHex = Array.from(clientBytes, b => b.toString(16).padStart(2, '0')).join('');
-export const controlClientId = [clientHex.slice(0,8),clientHex.slice(8,12),clientHex.slice(12,16),clientHex.slice(16,20),clientHex.slice(20)].join('-');
+// Keep this page's identity through reload, but not a newly opened tab which
+// may receive a copy of its opener's sessionStorage. Ownership/epoch still come
+// exclusively from the server; restoring an ID never acquires a lock.
+function loadControlClientId() {
+  const key = 'woc_control_reload_client';
+  try {
+    const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+    const saved = sessionStorage.getItem(key);
+    if (navigation?.type === 'reload' && saved && /^[a-f0-9-]{36}$/.test(saved)) return saved;
+  } catch { /* Storage unavailable: retain isolation with a fresh in-memory ID. */ }
+  const hex = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
+  const id = [hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20)].join('-');
+  try { sessionStorage.setItem(key, id); } catch { /* Privacy mode: no reload restoration. */ }
+  return id;
+}
+export const controlClientId = loadControlClientId();
 const controlEpochs = new Map<string, string>();
 export const controlHeaders = (id: string, epoch?: string) => ({ 'x-woc-client': controlClientId, 'x-woc-epoch': epoch ?? controlEpochs.get(id) ?? '' });
 

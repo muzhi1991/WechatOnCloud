@@ -1682,10 +1682,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           {(inst?.controlManaged ? !control?.mine : control && !control.free && !control.mine) && (
             <div className="iv-lock">
               <div className="iv-lock-card">
-                <div className="iv-lock-title">{control?.state === "maintenance" ? "维护中，暂停输入；进度见运行记录" : control?.state === "handover" ? "正在交接，等待旧操作结束" : control?.state === "faulted" ? "控制状态待恢复" : control?.holder ? `「${control.holder}」正在操作` : "当前为只读，可申请控制"}</div>
-                <div className="iv-lock-sub">为避免多端互相干扰，你当前为只读模式。</div>
-                <button className="btn btn-primary iv-notice-btn" disabled={control?.pending || control?.state === "faulted"} onClick={takeControl}>
-                  申请控制
+                <div className="iv-lock-title">{!control ? "正在确认控制权…" : control.state === "maintenance" ? "维护中，暂停输入；进度见运行记录" : control.state === "handover" ? "正在交接，等待旧操作结束" : control.state === "faulted" ? "控制状态待恢复" : control.holder ? `「${control.holder}」正在操作` : "当前为只读，可申请控制"}</div>
+                <div className="iv-lock-sub">{!control ? "正在同步服务端状态，请稍候。" : "为避免多端互相干扰，你当前为只读模式。"}</div>
+                <button className="btn btn-primary iv-notice-btn" disabled={!control || control.pending || control.state === "faulted"} onClick={takeControl}>
+                  {control ? '申请控制' : '确认中…'}
                 </button>
                 {isAdmin && control?.state === 'faulted' && <button className="btn iv-notice-btn" onClick={() => void api.controlRecover(id).then(setControl).catch(e => toast(e.message, 'error'))}>恢复控制服务</button>}
               </div>

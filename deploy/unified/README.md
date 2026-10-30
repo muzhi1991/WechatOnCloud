@@ -3,7 +3,7 @@
 当前组件、MCP/HTTP 调用链、按端口分流及 Mac 自动登记机制见 [系统架构](../../doc/dev/WOC-Cua-系统架构.md)。
 
 后续只读服务已接入同一控制台：见 [WOC read daemon 验收](../../doc/dev/WOC-read-daemon-acceptance.md)
-及[部署说明](../read-daemon/README.md)。当前面板使用 `local/woc-panel:wechat-ui-v2`（微信 UI 原子接口）；
+及[部署说明](../read-daemon/README.md)。当前面板使用 `local/woc-panel:control-refresh-v1`（修复刷新丢失标签页身份）；
 下文镜像为各阶段历史记录。现有微信容器未重建，内部服务现支持可选 UI 原子操作。当前部署详见 [UI 验收](../../doc/dev/WOC-WeChat-UI-验收.md)。
 
 2026-10-29，按用户要求停止独立 D1 测试部署，在原 36083 面板新建桌面验证。不迁移 D1 实例、凭证或登记，不引入跨部署接管逻辑。
@@ -91,3 +91,11 @@ UI 适配。账号、微信进程和现有实例容器均未重启。
 新建/重建实例可使用包含模块的 `local/woc-cua:read-ui-v2`，但需单独配置
 账号、读取服务和 `ui.enabled`；不会默认启用自动操作。当前原实例未切换镜像。
 详细接口、部署记录及局部回滚见 [UI 首版验收](../../doc/dev/WOC-WeChat-UI-验收.md)。
+
+## 2026-10-30 网页刷新恢复控制权
+
+当前镜像为 `local/woc-panel:control-refresh-v1`，固定 ID
+`sha256:6032eca0da7cdde4521c4e4ea2e94d3613edbef0417be257b6a0f9c76cd7ee71`。
+只更新网页，在确认无持锁任务后重建同一面板；实例容器未动。静态资源路径在
+后端启动时登记，因此新增哈希资源必须随面板重建加载，不能仅热复制。
+根因、真实浏览器回归、优先级和回滚见 [刷新修复记录](../../doc/dev/WOC-网页控制权刷新修复.md)。
