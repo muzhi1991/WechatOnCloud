@@ -159,8 +159,45 @@ class Client:
         if release_error:result['release_warning']=release_error
         return result
 
+    def react_article(self,url,reaction,request_id):
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{16,120}',request_id):
+            raise Problem({'code':'WOC_INVALID_ARGUMENT','error':'Use a unique 16..120 character request ID'})
+        lease=self.control('acquire')
+        if not lease.get('mine'):raise Problem({'code':'WOC_LOCK_BUSY','error':'Control not acquired'})
+        self.epoch=lease['lock_id'];failure=None;release_error=None;steps=[]
+        try:
+            for kind in (['like','wow'] if reaction=='both' else [reaction]):
+                before=self.query('browser_article_state')
+                action=self.query('browser_article_react',article_ref=before['article_ref'],expected_url=url,
+                                  reaction=kind,request_id=request_id+'-'+kind)
+                step={'reaction':kind,'action':action,'verified_active':False};steps.append(step)
+                # Read-only verification; never repeat the toggle on a timeout.
+                for _ in range(4):
+                    time.sleep(.2);after=self.query('browser_article_state')
+                    if after['url']!=before['url']:
+                        raise Problem({'code':'WOC_UI_STALE','error':'Article changed during verification','execution':'partial'})
+                    if after['reactions'][kind]['active']:
+                        step['verified_active']=True;break
+                if not step['verified_active']:
+                    raise Problem({'code':'WOC_REACTION_UNCONFIRMED','error':'Reaction input was submitted but active state is unconfirmed; inspect, do not repeat','execution':'unknown'})
+            result=dict(ok=True,article={'title':after['title'],'url':after['url']},steps=steps,
+                        verification='ui_active_observed',verification_note='Observed UI state, not an independent server-persistence receipt.')
+        except Problem as e:
+            failure=e;failure.result['steps']=steps
+        finally:
+            try:self.control('release',lock_id=self.epoch)
+            except Problem as e:release_error=e.result
+            self.epoch=None
+        if failure:
+            if release_error:failure.result['release_warning']=release_error
+            raise failure
+        if release_error:result['release_warning']=release_error
+        return result
+
     def workflow(self,args):
         if args.operation=='state':return self.state()
+        if args.operation=='article-state':return self.query('browser_article_state')
+        if args.operation=='react-article':return self.react_article(args.url,args.reaction,args.request_id)
         if args.operation=='open-url':return self.open_url(args.url)
         target=self.resolve(args.chat,args.source)
         if args.operation=='send-text':
@@ -205,6 +242,11 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config',default=os.environ.get('WOC_CLIENT_CONFIG'));p.add_argument('--machine',required=True)
     sub=p.add_subparsers(dest='operation',required=True);sub.add_parser('state')
+    sub.add_parser('article-state',help='Read the current article and toolbar reaction states without a lock')
+    r=sub.add_parser('react-article',help='Enable authorized article reactions; never cancel or blindly retry')
+    r.add_argument('--url',required=True,help='Expected article URL; open it with open-url first if needed')
+    r.add_argument('--reaction',required=True,choices=['like','wow','both'],help='like=赞; wow=爱心/在看 (visible to friends); both=both')
+    r.add_argument('--request-id',required=True,help='Unique 16..120 character action ID; reuse after an interrupted attempt')
     u=sub.add_parser('open-url');u.add_argument('--url',required=True)
     for op in ('open-chat','send-text'):
         s=sub.add_parser(op);s.add_argument('--chat',required=True);s.add_argument('--source',choices=['sessions','contacts','groups'],default='sessions')

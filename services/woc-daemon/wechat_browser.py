@@ -1,6 +1,7 @@
 """Bounded WeChatAppEx operations. No lock callbacks or workflow orchestration."""
 from pathlib import Path
-from urllib.parse import urlsplit
+import re
+from urllib.parse import urlsplit, parse_qs, urlencode
 from wechat_ui import Desktop, UIError, showing
 
 
@@ -13,6 +14,32 @@ def validate_url(url):
         parsed.port
     except (ValueError,TypeError): valid=False
     if not valid: raise UIError('WOC_INVALID_ARGUMENT','Expected an absolute HTTP(S) URL without credentials or whitespace')
+
+
+def article_url(url):
+    """Stable article identity; never retain login/session query parameters."""
+    validate_url(url)
+    u=urlsplit(url);q=parse_qs(u.query)
+    if u.hostname!='mp.weixin.qq.com' or u.port not in (None,443):
+        raise UIError('WOC_ARTICLE_UNSUPPORTED','Expected a WeChat public-account article URL')
+    if u.path=='/s' and all(len(q.get(k,[]))==1 for k in ('__biz','mid','idx','sn')):
+        return 'https://mp.weixin.qq.com/s?'+urlencode({k:q[k][0] for k in ('__biz','mid','idx','sn')})
+    if re.fullmatch(r'/s/[A-Za-z0-9_-]+',u.path):return 'https://mp.weixin.qq.com'+u.path
+    raise UIError('WOC_ARTICLE_UNSUPPORTED','Article identity is missing; inspect the loaded article URL')
+
+
+def reaction_controls(nodes):
+    """Known article toolbar only, never comment likes or arbitrary page buttons."""
+    controls={}
+    for kind,base,active,label in [('like','sns_praise_btn','praised','赞'),('wow','sns_love_btn','love_btn_loved','在看')]:
+        matches=[n for n in nodes if n['role']=='push button' and base in n.get('attrs',{}).get('class','').split()
+                 and 'sns_opr_btn' in n.get('attrs',{}).get('class','').split() and showing(n)
+                 and re.fullmatch(label+r'(?:\s+[\d.万wW+]+)?',n['name'])]
+        if len(matches)!=1:raise UIError('WOC_ARTICLE_UNSUPPORTED','Expected a unique visible article toolbar; inspect with Cua')
+        n=matches[0]
+        if kind=='wow' and n['attrs'].get('id')!='js_zaikan':raise UIError('WOC_ARTICLE_UNSUPPORTED','Unknown heart control')
+        controls[kind]=dict(node=n,active=active in n['attrs']['class'].split(),label=n['name'])
+    return controls
 
 
 def browser_controls(nodes):
@@ -89,6 +116,8 @@ class Browser(Desktop):
             raise UIError('WOC_APP_NOT_FOREGROUND','Expected browser window is no longer foreground')
 
     def execute(self,op,body):
+        if op in ('browser_article_state','browser_article_react'):
+            return self.article_execute(op,body)
         state=self.observe()
         if op=='browser_state':return state
         if not state['open']:raise UIError('WOC_BROWSER_NOT_OPEN','Open WeChat 搜一搜 first',precondition={'operation':'navigate','page':'web_search'})
@@ -113,3 +142,58 @@ class Browser(Desktop):
             raise UIError('WOC_DRAFT_MISMATCH','URL input did not match; no Enter submitted')
         self.foreground();self.cmd(['xdotool','key','Return'])
         return dict(ok=True,execution='completed',verification='url_submitted',next_action={'kind':'browser_state'})
+
+    def article_observe(self):
+        state=self.observe()
+        if not state['open']:raise UIError('WOC_BROWSER_NOT_OPEN','Open the article with the client open-url workflow first')
+        if state['dialog']:raise UIError('WOC_DIALOG_OPEN','Resolve the browser dialog first')
+        docs=[d for d in state['documents'] if not d['busy']]
+        if len(docs)!=1:raise UIError('WOC_ARTICLE_UNSUPPORTED','Expected one loaded article document')
+        doc=docs[0];url=article_url(doc.get('url') or '')
+        a='org.a11y.atspi.Accessible';p='org.freedesktop.DBus.Properties'
+        queue=[(self.service,doc['document_id'])];nodes=[];seen=set()
+        for service,path in queue:
+            if (service,path) in seen or path.endswith('/null'):continue
+            seen.add((service,path))
+            if len(seen)>1600:raise UIError('WOC_UI_INCOMPLETE','Article tree exceeds observation budget')
+            role=str(self.call(service,path,a,'GetRoleName'))
+            # Comments can contain their own likes; stop at the known toolbar's
+            # buttons after collecting their attributes, never act on page text.
+            if role in ('push button','dialog','alert'):
+                bits=sum(int(v)<<(32*i) for i,v in enumerate(self.call(service,path,a,'GetState')))
+                attrs=dict(self.call(service,path,a,'GetAttributes'))
+                name=str(self.call(service,path,p,'Get',a,'Name'))
+                rect=[int(v) for v in self.call(service,path,'org.a11y.atspi.Component','GetExtents',self.dbus.UInt32(0))]
+                n=dict(path=path,service=service,role=role,name=name,attrs=attrs,bits=bits,rect=rect)
+                if role in ('dialog','alert') and showing(n):raise UIError('WOC_DIALOG_OPEN','Resolve the article dialog first')
+                nodes.append(n)
+            queue.extend((str(s),str(r)) for s,r in self.call(service,path,a,'GetChildren'))
+        controls=reaction_controls(nodes)
+        frame=state['_controls']['frame']['rect']
+        for control in controls.values():
+            x,y,w,h=control['node']['rect'];fx,fy,fw,fh=frame
+            if w<4 or h<4 or not (fx<=x and fy+40<=y and x+w<=fx+fw and y+h<=fy+fh):
+                raise UIError('WOC_ARTICLE_UNSUPPORTED','Article reaction is outside the browser viewport; inspect with Cua')
+        return dict(app='wechat',surface='article',title=doc['title'],url=url,
+                    reactions={k:dict(active=v['active'],label=v['label']) for k,v in controls.items()},
+                    _identity=dict(window=state['_identity'],document_id=doc['document_id'],url=url),_controls=controls)
+
+    def article_execute(self,op,body):
+        state=self.article_observe()
+        if op=='browser_article_state':return state
+        if state['_identity']!=body['_identity'] or state['url']!=article_url(body['expected_url']):
+            raise UIError('WOC_UI_STALE','The article changed; observe and verify the intended article again')
+        kind=body['reaction'];control=state['_controls'][kind]
+        if control['active']:
+            return dict(ok=True,execution='completed',verification='already_active',reaction=kind,changed=False)
+        self.cmd(['xdotool','windowactivate','--sync',self.window]);self.foreground()
+        # AT-SPI Action invokes this exact observed control, avoiding coordinate
+        # races/occlusion. A timeout is uncertain and must not be replayed.
+        n=control['node'];iface='org.a11y.atspi.Action'
+        count=int(self.call(n['service'],n['path'],'org.freedesktop.DBus.Properties','Get',iface,'NActions'))
+        actions=[i for i in range(count) if str(self.call(n['service'],n['path'],iface,'GetName',self.dbus.Int32(i))) in ('click','press')]
+        if len(actions)!=1:raise UIError('WOC_ARTICLE_UNSUPPORTED','Expected a unique accessibility click action')
+        self.dispatched=True
+        accepted=bool(self.call(n['service'],n['path'],iface,'DoAction',self.dbus.Int32(actions[0])))
+        return dict(ok=accepted,execution='completed' if accepted else 'unknown',verification='input_dispatched',
+                    reaction=kind,changed=None,next_action={'kind':'browser_article_state'})

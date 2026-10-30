@@ -18,12 +18,14 @@ import time
 from wechat_ui import UIError
 
 FIELDS={
+    'browser_article_state':set(), 'browser_article_react':{'article_ref','expected_url','reaction','request_id'},
     'browser_state':set(), 'browser_open_url':{'window_ref','url'},
     'ui_state':set(), 'navigate':{'page'}, 'ui_search':{'scope','query'},
     'open_item':{'target_ref'}, 'fill_text':{'expected_chat','text','expected_draft'},
     'send_draft':{'expected_chat','expected_text','request_id'}, 'ui_request_status':{'request_id'},
 }
-READS={'ui_state','ui_request_status','browser_state'}
+READS={'ui_state','ui_request_status','browser_state','browser_article_state'}
+RECEIPTS={'send_draft','browser_article_react'}
 
 
 def validate(op,body):
@@ -32,7 +34,7 @@ def validate(op,body):
     required=FIELDS[op]-({'expected_draft'} if op=='fill_text' else set())
     if required-body.keys(): raise UIError('WOC_INVALID_ARGUMENT','Missing required argument')
     for k,v in body.items():
-        if not isinstance(v,str) or '\0' in v or len(v)> (8192 if k=='url' else 2000 if k in ('text','expected_text','expected_draft') else 256):
+        if not isinstance(v,str) or '\0' in v or len(v)> (8192 if k in ('url','expected_url') else 2000 if k in ('text','expected_text','expected_draft') else 256):
             raise UIError('WOC_INVALID_ARGUMENT','Invalid string argument')
         if not v and k!='expected_draft': raise UIError('WOC_INVALID_ARGUMENT','Empty argument')
     if op=='navigate' and body['page'] not in ('conversations','contacts','favorites','web_search'):
@@ -42,6 +44,11 @@ def validate(op,body):
     if op=='browser_open_url':
         from wechat_browser import validate_url
         validate_url(body['url'])
+    if op=='browser_article_react':
+        from wechat_browser import article_url
+        article_url(body['expected_url'])
+        if body['reaction'] not in ('like','wow') or not re.fullmatch(r'[a-f0-9]{32}',body['article_ref']):
+            raise UIError('WOC_INVALID_ARGUMENT','Invalid reaction or article reference')
     if 'request_id' in body and not re.fullmatch(r'[a-zA-Z0-9_-]{16,128}',body['request_id']):
         raise UIError('WOC_INVALID_ARGUMENT','request_id must be a unique 16..128 character identifier')
 
@@ -85,35 +92,53 @@ class UIService:
             if op=='ui_request_status':
                 with self.db() as db: row=db.execute('SELECT result,hash FROM requests WHERE owner=? AND id=?',(owner,body['request_id'])).fetchone()
                 return dict(found=bool(row),result=json.loads(row[0]) if row else None,request_hash=row[1] if row else None)
-            digest=hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest()
-            if op=='send_draft':
+            hash_body=body
+            if op=='browser_article_react':
+                from wechat_browser import article_url
+                hash_body=dict(operation=op,reaction=body['reaction'],expected_url=article_url(body['expected_url']),request_id=body['request_id'])
+            digest=hashlib.sha256(json.dumps(hash_body,sort_keys=True).encode()).hexdigest()
+            if op in RECEIPTS:
                 with self.db() as db:
                     db.execute('DELETE FROM requests WHERE created<?',(now-7*86400,))
                     row=db.execute('SELECT hash,result FROM requests WHERE owner=? AND id=?',(owner,body['request_id'])).fetchone()
                     if row:
-                        if row[0]!=digest: raise UIError('WOC_REQUEST_CONFLICT','request_id already used for different send arguments')
+                        if row[0]!=digest: raise UIError('WOC_REQUEST_CONFLICT','request_id already used for different action arguments')
                         return dict(json.loads(row[1]),replayed=True)
                     if db.execute('SELECT count(*) FROM requests').fetchone()[0]>=1024:
                         raise UIError('WOC_REQUEST_LIMIT','Send receipt retention limit reached')
-                    pending=dict(ok=False,code='WOC_ACTION_UNCERTAIN',error='Send may have started; inspect before retry',execution='unknown')
+                    # Resolve article references before reserving a receipt: a
+                    # stale/foreign reference proves no input was dispatched.
+                    if op=='browser_article_react':
+                        ref=self.refs.get(body['article_ref'])
+                        if not ref or ref['owner']!=owner or ref.get('kind')!='article':
+                            raise UIError('WOC_UI_STALE','Article reference expired or belongs to another caller')
+                    pending=dict(ok=False,code='WOC_ACTION_UNCERTAIN',error='Action may have started; inspect before retry',execution='unknown')
                     db.execute('INSERT INTO requests VALUES(?,?,?,?,?)',(owner,body['request_id'],digest,json.dumps(pending),now))
             payload=dict(body)
+            if op=='browser_article_react':
+                payload=dict(_identity=ref['identity'],expected_url=body['expected_url'],reaction=body['reaction'])
             if op=='open_item':
                 ref=self.refs.get(body['target_ref'])
-                if not ref or ref['owner']!=owner or ref.get('kind')=='browser': raise UIError('WOC_UI_STALE','Item reference expired or belongs to another caller; observe again')
+                if not ref or ref['owner']!=owner or ref.get('kind') in ('browser','article'): raise UIError('WOC_UI_STALE','Item reference expired or belongs to another caller; observe again')
                 payload={'_target':ref['target'],'_identity':ref['identity']}
             if op=='browser_open_url':
                 ref=self.refs.get(body['window_ref'])
                 if not ref or ref['owner']!=owner or ref.get('kind')!='browser':raise UIError('WOC_UI_STALE','Browser reference expired or belongs to another caller; observe again')
                 payload={'_identity':ref['identity'],'url':body['url']}
             result=self.runner(op,payload)
+            if op=='browser_article_state' and result.get('surface')=='article':
+                identity=result.pop('_identity');result.pop('_controls',None)
+                if len(self.refs)>12800:self.refs.clear()
+                ref=secrets.token_hex(16)
+                self.refs[ref]=dict(owner=owner,kind='article',identity=identity,expires=now+60)
+                result.update(article_ref=ref,reference_ttl_seconds=60)
             if op=='browser_state' and result.get('open'):
                 identity=result.pop('_identity');result.pop('_controls',None)
                 if len(self.refs)>12800:self.refs.clear()
                 ref=secrets.token_hex(16)
                 self.refs[ref]=dict(owner=owner,kind='browser',identity=identity,expires=now+60)
                 result.update(window_ref=ref,reference_ttl_seconds=60)
-            if op=='send_draft':
+            if op in RECEIPTS:
                 with self.db() as db:
                     if result.get('execution')=='not_started':
                         # A proven prerequisite failure may be retried after the

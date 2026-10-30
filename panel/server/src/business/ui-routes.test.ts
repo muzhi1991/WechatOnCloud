@@ -30,6 +30,13 @@ test('application writes use the existing lock; errors preserve prerequisites an
     const browserBefore=calls;
     assert.equal((await call('browser_open_url',{window_ref:'a'.repeat(32),url:'https://linux.weixin.qq.com'})).json().code,'WOC_LOCK_REQUIRED');
     assert.equal(calls,browserBefore);before=calls;
+    const articleBody={article_ref:'b'.repeat(32),expected_url:'https://mp.weixin.qq.com/s/test',reaction:'like',request_id:'article-gateway-test-01'};
+    assert.equal((await call('browser_article_react',articleBody)).json().code,'WOC_LOCK_REQUIRED');
+    assert.equal(calls,before);
+    // Read requests reach the provider without an admission epoch (the fake
+    // provider returns a prerequisite, which must remain intact).
+    assert.equal((await call('browser_article_state')).json().execution,'not_started');
+    assert.equal(epoch,'');before=calls;
     const actor={kind:'agent' as const,id:'client:test',label:'Test'};
     // Use the same identity construction as actual client routes.
     const { clientActor }=await import('../control/clients.js');
@@ -43,6 +50,10 @@ test('application writes use the existing lock; errors preserve prerequisites an
     const browser=await call('browser_open_url',{window_ref:'a'.repeat(32),url:'https://linux.weixin.qq.com'},{'x-woc-expected-epoch':lease.epoch});
     assert.equal(browser.statusCode,409);assert.equal(epoch,lease.epoch);
     assert.deepEqual(browser.json().precondition,{page:'chat'});
+    const article=await call('browser_article_react',articleBody,{'x-woc-expected-epoch':lease.epoch});
+    assert.equal(article.statusCode,409);assert.equal(epoch,lease.epoch);
+    assert.deepEqual(article.json().precondition,{page:'chat'});
+    assert.equal((await call('browser_article_react',{...articleBody,reaction:'share'})).statusCode,400);
     failureStatus=503;
     const unavailable=await call('navigate',{page:'contacts'});
     assert.equal(unavailable.statusCode,503);assert.equal(unavailable.json().execution,'not_started');
