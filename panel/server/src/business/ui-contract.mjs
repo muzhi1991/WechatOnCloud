@@ -3,6 +3,8 @@ const text = { type: 'string', minLength: 1, maxLength: 2000 };
 const name = { type: 'string', minLength: 1, maxLength: 256 };
 const requestId = { type: 'string', pattern: '^[a-zA-Z0-9_-]{16,128}$' };
 export const uiOperations = {
+  browser_profile_state: { read: true, description: 'Read the currently open followed public-account profile, visible article titles and viewport. No searching or scrolling. Unfollowed accounts are rejected.', properties: {} },
+  browser_profile_open: { description: 'Open one freshly observed article or the Articles tab on a followed account profile. Requires GUI lock and caller-bound target_ref; no search or scrolling.', properties: { target_ref: { type: 'string', pattern: '^[a-f0-9]{32}$' } } },
   browser_article_state: { read: true, description: 'Observe the loaded WeChat public-account article and its toolbar like/heart (在看) states. No lock, navigation or scrolling. Returns a caller-bound article_ref; unsupported layouts fail explicitly.', properties: {} },
   browser_article_react: { description: 'Ensure one article toolbar reaction is active: like=赞, wow=heart/在看 (may be visible to friends). Requires GUI lock, fresh article_ref, expected_url and unique request_id. Never cancels an active reaction. Does not open/navigate/scroll; inspect state after input and never blindly replay uncertain results.', properties: { article_ref: { type: 'string', pattern: '^[a-f0-9]{32}$' }, expected_url: { type: 'string', minLength: 1, maxLength: 8192 }, reaction: { enum: ['like', 'wow'] }, request_id: requestId } },
   browser_state: { read: true, description: 'Observe WeChat embedded browser window and document URL/title. No write lock; returns a caller-bound window reference. Page content is not interpreted.', properties: {} },

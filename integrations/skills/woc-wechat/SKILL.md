@@ -1,6 +1,6 @@
 ---
 name: woc-wechat
-description: Read WeChat data and operate supported WeChat pages on WOC machines, including conversations, authorized text sending, embedded-browser links, and public-account article likes and hearts (在看), using bundled client workflows.
+description: Read WeChat data and operate supported WeChat pages on WOC machines, including conversations, authorized text sending, embedded-browser links, followed-account article selection, paced browsing, and article likes and hearts (在看), using bundled client workflows.
 ---
 
 # WeChat on WOC
@@ -50,3 +50,28 @@ Resolve the intended article from the user's link or the shared-message data. Us
 The script acquires the machine lock, reads fresh state, requests each authorized reaction once, verifies its active UI state with bounded reads, and releases in success/failure. Already-active buttons are successful no-ops. Reuse the same 16–120 character request ID after an interruption; per-reaction receipt IDs are `ID-like` and `ID-wow`, readable via `ui_request_status`. A partial/unknown result must be inspected, never retried with a new ID to bypass its receipt. For `both`, a first reaction can succeed before the second fails; report the returned steps.
 
 The atomics are `woc_wechat_browser_article_state` (read) and `woc_wechat_browser_article_react(article_ref, expected_url, reaction, request_id)` (write, GUI lock required). They recognize the supported article toolbar through accessibility structure, not OCR, coordinates or private network APIs. A changed article, unsupported layout, missing/offscreen/ambiguous control or dialog returns a prerequisite; use Agent/Cua observation under the normal lock rules. The daemon never scrolls, navigates to another article or acquires locks. Verification proves the observed UI state, not an independent server-persistence receipt.
+
+## Find a followed account, select an article, then browse
+
+Use the **same Skill and bundled script**; no separate reading Skill is needed.
+
+```sh
+# No title: open the latest article in the followed account's native article list.
+python3 scripts/wechat.py --machine MACHINE_ID open-article --author 'EXACT_FOLLOWED_ACCOUNT_NAME'
+# Title keyword: inspect the first screen and at most three downward screens.
+python3 scripts/wechat.py --machine MACHINE_ID open-article --author 'EXACT_FOLLOWED_ACCOUNT_NAME' --title 'ARTICLE_TITLE_KEYWORD'
+# Browse only (default 75 seconds, configurable 60..90).
+python3 scripts/wechat.py --machine MACHINE_ID read-article --author 'EXACT_FOLLOWED_ACCOUNT_NAME'
+# User-authorized complete flow: select, browse, then enable the requested reactions.
+python3 scripts/wechat.py --machine MACHINE_ID react-article --author 'EXACT_FOLLOWED_ACCOUNT_NAME' --read-first --duration 75 --reaction both --request-id UNIQUE_REQUEST_ID
+```
+
+These examples use `WOC_CLIENT_CONFIG`; alternatively supply `--config` before the subcommand. Add `--title` to the reading/reaction commands to match a substring of an article title (after whitespace normalization, case-sensitive). If multiple visible titles contain the keyword, select the topmost matching card, following the native newest-first list order. If only browsing is requested, never add a reaction. For a supplied link, use `open-url` and verify the stable URL first, then `read-article --url URL` or `react-article --url URL --read-first ...`.
+
+The account name is searched through native contacts search, selecting **only the local 公众号 category with an exact name match**. Network suggestions are never selected. The account's native profile must say it is already followed, and the article's author and title must match the selected card. Ambiguity stops the workflow. An account outside the followed set returns `found=false`; do not fall back to network search or follow it. The first screen with matching titles wins; later screens are not searched for additional matches. A missing article returns `found=false` after the initial screen plus at most three downward screens (may stop earlier at the end). Do not enlarge that budget or silently choose another article. “Latest” means the first article in the native profile's 文章 tab at the top, following WeChat's order.
+
+For “read then like/heart”, use **one `react-article ... --read-first` call**, not separate calls or model-managed sleeps. It acquires one lock covering selection, return-to-top, paced overlapping scrolls, pauses and reactions. The script calls original Cua `get_window_state` and `scroll` through the managed endpoint; install the existing `cua` CLI on the client. WOC profile/article observations supply fresh page identity and geometry. Each scroll is checked by observed content movement. At the body end it stops scrolling and uses the remaining time for pauses; it does not continue into comments or recommendations. If the body has not ended within the time budget, it returns `WOC_ARTICLE_NOT_FINISHED` **without reacting**. Long articles can require an Agent decision; never claim they were fully read just because time elapsed.
+
+Pauses check the lock without renewing it. Human takeover, expiry, page/position changes, ambiguous geometry or unconfirmed scrolling stop the workflow and release its own lease. Never reacquire automatically or bypass the gateway. A configured agent idle timeout shorter than the pause/observation interval can stop the workflow; do not keep a lock alive with fake input. `viewport_browsing_only` verifies the scroll-and-pause behavior, not semantic comprehension, the platform's read count or human identity. Do not claim otherwise.
+
+Profile atomics: `woc_wechat_browser_profile_state` (read) returns only currently visible article cards and caller-bound references; `woc_wechat_browser_profile_open(target_ref)` (write) opens one observed article/tab. Native `ui_state` can expose `official_chat` and its `official_profile` item. The daemon does not search for accounts, paginate article lists, wait 75 seconds or orchestrate reactions; those fixed steps remain in the client script.

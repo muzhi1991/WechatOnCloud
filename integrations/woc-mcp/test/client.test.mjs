@@ -19,7 +19,7 @@ test('real MCP SDK client: tools, resources, live update, unsubscribe, reconnect
     if (req.headers.authorization !== 'Bearer ' + 'x'.repeat(48)) { res.writeHead(401); res.end('{}'); return; }
     if (req.url.includes('private')) { res.writeHead(404); res.end(JSON.stringify({ code: 'WOC_MACHINE_NOT_FOUND' })); return; }
     if (req.url.endsWith('/ui_search')) { res.writeHead(409); res.end(JSON.stringify({ ok: false, code: 'WOC_WRONG_PAGE', execution: 'not_started', precondition: { page: 'contacts' } })); return; }
-    if (req.url.endsWith('/navigate') || req.url.endsWith('/browser_open_url') || req.url.endsWith('/browser_article_react')) { assert.equal(req.headers['x-woc-expected-epoch'], 'a'.repeat(36)); }
+    if (req.url.endsWith('/navigate') || req.url.endsWith('/browser_open_url') || req.url.endsWith('/browser_article_react') || req.url.endsWith('/browser_profile_open')) { assert.equal(req.headers['x-woc-expected-epoch'], 'a'.repeat(36)); }
     let result = {};
     if (req.url.endsWith('/machines')) result = { machines: [{ id: 'test', name: 'Test' }] };
     if (req.url.endsWith('/revision')) { polls++; result = { revision }; }
@@ -42,7 +42,9 @@ test('real MCP SDK client: tools, resources, live update, unsubscribe, reconnect
     first = await connect();
     assert.equal(first.client.getServerCapabilities().resources.subscribe, true);
     const tools = await first.client.listTools();
-    for (const name of ['woc_wechat_browser_article_state','woc_wechat_browser_article_react']) assert.ok(tools.tools.some(x=>x.name===name));
+    for (const name of ['woc_wechat_browser_article_state','woc_wechat_browser_article_react','woc_wechat_browser_profile_state','woc_wechat_browser_profile_open']) assert.ok(tools.tools.some(x=>x.name===name));
+    await first.client.callTool({name:'woc_wechat_browser_profile_state',arguments:{machine_id:'test'}});
+    await first.client.callTool({name:'woc_wechat_browser_profile_open',arguments:{machine_id:'test',lock_id:'a'.repeat(36),target_ref:'b'.repeat(32)}});
     await first.client.callTool({name:'woc_wechat_browser_article_state',arguments:{machine_id:'test'}});
     await first.client.callTool({name:'woc_wechat_browser_article_react',arguments:{machine_id:'test',lock_id:'a'.repeat(36),article_ref:'b'.repeat(32),expected_url:'https://mp.weixin.qq.com/s/test',reaction:'wow',request_id:'article-mcp-test-01'}});
     for (const name of ['woc_lock_acquire', 'woc_wechat_groups', 'woc_wechat_history', 'woc_wechat_extract', 'woc_wechat_browser_state', 'woc_wechat_browser_open_url']) assert.ok(tools.tools.some(x => x.name === name));

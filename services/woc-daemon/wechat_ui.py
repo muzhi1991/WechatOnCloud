@@ -88,7 +88,7 @@ def classify(nodes):
             if n["name"] in SECTIONS: section = SECTIONS[n["name"]]; continue
             if section == "function" and n["name"] == "文件传输助手":
                 item(n, "system_chat", n["name"], "open_chat")
-            if section in ("contact", "group") and n["name"] and not n["name"].startswith("查看全部"):
+            if section in ("contact", "group", "official") and n["name"] and not n["name"].startswith("查看全部"):
                 item(n, section, n["name"].split("\n")[0], "open_chat")
     else:
         listing = contacts or conversations
@@ -117,6 +117,20 @@ def classify(nodes):
                     composer={"text": editor.get("text", ""), "send_enabled": bool(send["bits"] & (1<<8))})
     if page == "unknown":
         data["visible_labels"] = list(dict.fromkeys(n["name"] for n in visible if n["role"] in ("label","list") and n["name"]))[:40]
+    official_frames=[]
+    for n in visible:
+        if n['role']!='push button' or n['name']!='公众号主页':continue
+        parent=n
+        for _ in range(40):
+            if parent['parent'].endswith('/root'):break
+            parent=by_path.get(parent['parent'])
+            if not parent:break
+        if not parent or parent['role']!='frame' or not parent['name']:continue
+        official_frames.append(parent['path'])
+        if parent['bits'] & (1<<1):
+            page='official_chat';items=[]
+            item(n,'official_profile',parent['name'],'open_official_profile')
+            data=dict(items=items,official_account=parent['name'])
     dialogs = [n["name"] for n in visible if n["role"] in ("dialog", "alert")]
     search_root=None
     if result_list:
@@ -126,7 +140,7 @@ def classify(nodes):
             cursor=by_path.get(cursor['parent'])
             if not cursor:break
     for n in visible:
-        if n['parent'].endswith('/root') and n['path']!=search_root and not (n['role']=='frame' and n['name']=='微信'):
+        if n['parent'].endswith('/root') and n['path']!=search_root and n['path'] not in official_frames and not (n['role']=='frame' and n['name']=='微信'):
             dialogs.append(n['name'] or 'unrecognized_overlay')
     return dict(app="wechat", page=page, dialog=dialogs or None, data=data,
                 available_actions=["ui_state", *(["navigate"] if nav else []),
@@ -234,7 +248,7 @@ class Desktop:
         if op=='navigate':
             n=controls['nav'].get(body['page'])
             if not n: raise UIError("WOC_PAGE_UNSUPPORTED","Requested navigation entry is unavailable")
-            if body['page']=='web_search':
+            if body['page'] in NAV:
                 windows=self.cmd(['xdotool','search','--all','--onlyvisible','--pid',str(self.pid),'--name','^微信$']).decode().split()
                 if len(windows)!=1:raise UIError('WOC_APP_UNAVAILABLE','Expected a unique main WeChat window')
                 self.dispatched=True

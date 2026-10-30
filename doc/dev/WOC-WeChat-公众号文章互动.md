@@ -2,7 +2,7 @@
 
 ## 分层与接口
 
-遵循 [应用操作开发规则](WOC-应用操作开发规则.md)。此功能仅操作已打开文章的点赞栏，客户端负责寻找文章、打开链接、显式获取/释放写锁和结果核验。网关只做身份、ACL、锁和路由；daemon 不回调网关、不启动浏览器、不搜索作者、不滚动、不调用微信私有网络 API。
+遵循 [应用操作开发规则](WOC-应用操作开发规则.md)。daemon 互动原子仅操作已打开文章的点赞栏，客户端负责寻找文章、打开链接、显式获取/释放写锁和结果核验。网关只做身份、ACL、锁和路由；daemon 不回调网关、不启动浏览器、不搜索作者、不滚动、不调用微信私有网络 API。
 
 | 层 | 操作 | 语义 |
 | --- | --- | --- |
@@ -10,7 +10,8 @@
 | daemon / HTTP / MCP | `browser_article_react` | 写锁下核对 article_ref、expected_url，确保 `like`（赞）或 `wow`（爱心/在看）处于点亮状态；已点亮则不操作 |
 | 客户端脚本 | `article-state` | 读取当前文章状态 |
 | 客户端脚本 | `react-article --url URL --reaction like\|wow\|both --request-id ID` | 获锁、逐项观察/执行/只读核验、释放；不隐式打开另一篇文章 |
-| Agent + Cua | 从公众号作者页面选择另一篇文章等 | 需要理解页面的导航；确认目标后交给固定脚本 |
+| 客户端脚本 | `open-article` / `read-article` / `react-article --author ... --read-first` | 搜索已关注账号、按关键词有界选文、组合原生 Cua 滚动；详见后面的扩展说明 |
+| Agent + Cua | 未适配页面或需判断的异常 | 观察并处理明确的前置条件，确认目标后交给固定脚本 |
 
 MCP 名称统一加 `woc_wechat_`；所有操作需要 `machine_id`，写操作另需 `lock_id`。HTTP 复用 `/api/integrations/wechat/:machine/:operation`，携带既有认证及控制周期。新增接口来自共享 ui-contract，未新增独立服务或任意脚本执行入口。
 
@@ -50,3 +51,31 @@ MCP 名称统一加 `woc_wechat_`；所有操作需要 `machine_id`，写操作�
 - Agent 导航期间曾误开原创说明帮助页，观察后返回继续；无业务互动。并行查询收据曾收到 `WOC_UI_BUSY`，改为后续只读查询成功，没有重放互动输入。测试没有评论、关注、分享、发聊天消息、赞赏或修改服务。
 - 该会话保留在控制台供复查；Agent 证据位于其工作区 `acceptance/article-reactions/`，宿主私有状态目录保存会话结果和完整 timeline。四个受保护桌面容器的 ID 与启动时间前后完全一致。
 - 原始文章数据、带会话参数的 URL、运行记录和截图保存在私有验收目录，不纳入此文档或 Git。
+
+## 已关注公众号选文与分段浏览
+
+新增能力仍在 `woc-wechat` Skill，固定流程在 `scripts/wechat.py`：
+
+- `open-article --author 名称 [--title 标题]`：原生联系人搜索 → 本地“公众号”分类精确匹配 → 公众号会话的“公众号主页” → 已关注主页的“文章”页。省略标题取微信原生列表第一篇；指定标题关键词按包含匹配（合并空白、区分大小写），最多查首屏加三次向下翻屏；当前屏多篇命中选最上面（列表顺序最新）的一篇，命中即打开，不继续查后续屏，找不到返回 `found=false`。不会选择网络搜索结果、关注新账号或更换目标。
+- `read-article --author 名称 [--title 标题] [--duration 75]`：选文后从正文顶部开始分段滚动、暂停，总浏览预算 60–90 秒。也支持已核对的当前文章 `--url`。
+- `react-article --author 名称 --read-first --duration 75 --reaction both --request-id ID`：在同一写锁内选文、浏览、核对正文结束，再执行原有幂等互动。只有明确授权的反应才可执行。旧的无 `--read-first` 调用仍兼容。
+
+新增 daemon 原子接口 `browser_profile_state`（读）与 `browser_profile_open(target_ref)`（写）。前者核对微信原生 `SubscriptionProfile/profile.html`、`subscribed=1`、账号标识和页面标题，返回视口内的文章卡片、文章标签与几何信息；后者只在新鲜、调用者绑定的引用匹配时打开一个卡片/标签。公众号会话在原生 `ui_state` 中归类为 `official_chat`。HTTP/MCP 共用既有统一契约，网关检查写锁，daemon 不回调网关。
+
+浏览由客户端通过原生 Cua CLI 的 `DriverService/CallTool` 调用 `get_window_state`、`scroll`，目标取自当前页面的进程/窗口，仍经受管 Cua 网关。每次先获取截图上下文、核对窗口坐标，再在正文区域滚动，重新读结构核对位移。没有新增通用坐标写接口。当前 Linux 微信一次滚轮 tick 实测约 120 px；脚本按视口选择重叠段，遇不符合预期的位移会停止，不能将该像素值当作所有版本的保证。
+
+正文 `js_article` / `js_content` 的位置决定顶部、已滚动距离和正文结束；固定互动栏遮住的区域从可读视口扣除。到正文底部后不再滚动，在剩余预算内暂停；时间用完仍未到正文底部则返回 `WOC_ARTICLE_NOT_FINISHED`，不点赞。整个流程只持一个写锁，暂停期间只查询锁状态，不续期；失锁、页面变化或输入结果不明即停止，最终释放自己的控制周期。浏览结果仅证明 UI 滚动/停留，不证明内容理解、微信阅读计数或服务端反应持久化。
+
+部署需要同时更新 daemon 的 `wechat_ui.py`、`wechat_browser.py`、`ui_service.py`，面板/MCP 的 `ui-contract.mjs`，客户端 Skill 与脚本。只重启读取服务及面板，不重启微信或桌面容器。回退使用 `/root/woc-ui-private/article-reading-v1` 的模块、Skill、面板环境备份；恢复原模块后重启 `woc-read`，恢复旧固定面板镜像后只重建 panel。新功能没有新增持久业务存储，继续复用有界引用和已有互动收据。
+
+
+### 本次验证（2026-10-30）
+
+- daemon/客户端 Python 44 项测试通过，涵盖正文结束、75 秒停留、失锁停止、不完整阅读禁止互动、关键词多命中选顶部、三屏上限、不选网络结果、未关注主页拒绝、引用隔离及过期；HTTP 网关测试、真实 MCP SDK 工具测试通过。
+- 部署的 Pi Agent 会话 `f1816b3c-2126-425b-b974-45cb44876e73` 使用内置 Skill 和自身 WOC 身份验收：以“智能算力”找到对应文章（向下滚动 1 次）；不存在的关键词在 3 次向下滚动后 `found=false`；最新文章浏览 75.3 秒、滚动 8 次，`reached_body_end=true`。
+- 接着两项互动均返回 `already_active`，没有取消/重复切换；Agent 独立读取确认 active=true，最终 MCP 锁状态 free。无真实发送消息或评论。
+- 验收中的一次导航后请求返回 `WOC_UI_EXECUTION_FAILED` / `not_started`，Agent 只读观察后重试一次成功。客户端随后补上导航后等待联系人搜索页就绪的有界观察，不自动重放失败写操作。
+- 补充真实回归：不存在的公众号返回 `followed_account_not_found`，关键词“乔布斯”匹配成功；无锁文章观察可用，无锁 profile 写操作返回 `WOC_LOCK_REQUIRED`。
+- 四个受保护桌面容器的 ID、StartedAt 未变；只更新读服务代码和 panel 入口。当前固定面板镜像 `sha256:880e91c441cb284e20c5a368d2a95c3a5e38fc1c95a1ea08724254db5c0dee08`，Agent 挂载 Skill/MCP 契约同步更新。
+
+长文章超过预算不点赞、失锁停止等分支由自动测试覆盖；未人为抢占真实用户会话做干扰。原生界面/网页结构变化仍会明确停止，需要后续版本适配，不能承诺任意公众号版式都受支持。

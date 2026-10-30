@@ -42,6 +42,29 @@ def reaction_controls(nodes):
     return controls
 
 
+def classes(n):return set(n.get('attrs',{}).get('class','').split())
+
+
+def intersect(a,b):
+    x,y=max(a[0],b[0]),max(a[1],b[1]);r,t=min(a[0]+a[2],b[0]+b[2]),min(a[1]+a[3],b[1]+b[3])
+    return [x,y,max(0,r-x),max(0,t-y)]
+
+
+def article_layout(nodes,viewport,frame,pid,window):
+    bodies=[n for n in nodes if n.get('attrs',{}).get('id')=='js_content']
+    roots=[n for n in nodes if n.get('attrs',{}).get('id')=='js_article']
+    authors=[n for n in nodes if n.get('attrs',{}).get('id')=='js_name']
+    if len(bodies)!=1 or len(roots)!=1:return None,None
+    body=bodies[0]['rect'];root=roots[0]['rect'];v=list(viewport)
+    bars=[n['rect'][1] for n in nodes if 'sns_opr_btn' in classes(n) and showing(n)]
+    if bars:v[3]=min(v[3],min(bars)-8-v[1])
+    if v[2]<20 or v[3]<40:return None,None
+    view=dict(pid=pid,window_id=int(window),frame=frame,viewport=v,body=body,
+              at_top=root[1]>=v[1]-3,at_bottom=body[1]+body[3]<=v[1]+v[3]+3,
+              position=max(0,v[1]-root[1]),remaining=max(0,body[1]+body[3]-v[1]-v[3]))
+    return view,authors[0]['name'] if len(authors)==1 else None
+
+
 def browser_controls(nodes):
     """Only native chrome is walked: page-controlled nodes are below document web."""
     visible=[n for n in nodes if showing(n)]
@@ -116,6 +139,16 @@ class Browser(Desktop):
             raise UIError('WOC_APP_NOT_FOREGROUND','Expected browser window is no longer foreground')
 
     def execute(self,op,body):
+        if op=='browser_profile_state':return self.profile_observe()
+        if op=='browser_profile_open':
+            state=self.profile_observe()
+            if state['_identity']!=body['_identity']:raise UIError('WOC_UI_STALE','The account page changed')
+            matches=[n for n in state['_items'] if n['_target']==body['_target']]
+            if len(matches)!=1:raise UIError('WOC_UI_STALE','The observed article or tab changed; observe again')
+            node=matches[0]['_target'];self.dispatched=True
+            self.cmd(['xdotool','windowactivate','--sync',self.window]);self.foreground()
+            self.click(dict(rect=node['rect']))
+            return dict(ok=True,execution='completed',verification='input_dispatched')
         if op in ('browser_article_state','browser_article_react'):
             return self.article_execute(op,body)
         state=self.observe()
@@ -143,6 +176,67 @@ class Browser(Desktop):
         self.foreground();self.cmd(['xdotool','key','Return'])
         return dict(ok=True,execution='completed',verification='url_submitted',next_action={'kind':'browser_state'})
 
+    def document_nodes(self,state):
+        docs=[d for d in state['documents'] if not d['busy']]
+        if len(docs)!=1:raise UIError('WOC_ARTICLE_UNSUPPORTED','Expected one loaded document')
+        doc=docs[0]
+        a='org.a11y.atspi.Accessible';p='org.freedesktop.DBus.Properties'
+        queue=[(self.service,doc['document_id'],'root')];nodes=[];seen=set()
+        for service,path,parent in queue:
+            if (service,path) in seen or path.endswith('/null'):continue
+            seen.add((service,path))
+            if len(seen)>1600:raise UIError('WOC_UI_INCOMPLETE','Page tree exceeds observation budget')
+            role=str(self.call(service,path,a,'GetRoleName'))
+            bits=sum(int(v)<<(32*i) for i,v in enumerate(self.call(service,path,a,'GetState')))
+            attrs=dict(self.call(service,path,a,'GetAttributes')) if role!='static' else {}
+            name=str(self.call(service,path,p,'Get',a,'Name'))
+            rect=[int(v) for v in self.call(service,path,'org.a11y.atspi.Component','GetExtents',self.dbus.UInt32(0))]
+            n=dict(path=path,parent=parent,service=service,role=role,name=name,attrs=attrs,bits=bits,rect=rect)
+            if role in ('dialog','alert') and showing(n):raise UIError('WOC_DIALOG_OPEN','Resolve the page dialog first')
+            nodes.append(n)
+            queue.extend((str(s),str(r),path) for s,r in self.call(service,path,a,'GetChildren'))
+        return doc,nodes
+
+    def profile_observe(self):
+        state=self.observe()
+        if not state['open'] or state['dialog']:raise UIError('WOC_PROFILE_NOT_OPEN','Open the followed account profile first')
+        docs=state['documents']
+        if len(docs)!=1:raise UIError('WOC_PROFILE_UNSUPPORTED','Expected one account profile')
+        if docs[0]['busy']:raise UIError('WOC_PROFILE_NOT_OPEN','Account profile is still loading')
+        u=urlsplit(docs[0].get('url') or '');q=parse_qs(u.query)
+        if (u.scheme,u.netloc,u.path)!=('weixin','resourceid','/SubscriptionProfile/profile.html'):
+            raise UIError('WOC_PROFILE_NOT_OPEN','Open the followed account profile first')
+        if q.get('subscribed')!=['1']:raise UIError('WOC_NOT_FOLLOWED','Only followed public accounts are supported')
+        name=q.get('showName',[''])[0];username=q.get('userName',[''])[0]
+        if not name or not username or docs[0]['title']!=name:raise UIError('WOC_PROFILE_UNSUPPORTED','Account identity is ambiguous')
+        doc,nodes=self.document_nodes(state)
+        viewport=next(n['rect'] for n in nodes if n['path']==doc['document_id'])
+        header=next((n for n in nodes if 'profile_details__header' in classes(n)),None)
+        tabs=[n for n in nodes if 'profile_details__tabs-item' in classes(n) and n['name']=='文章']
+        lists=[n for n in nodes if 'profile_details__content_article_inner' in classes(n)]
+        if not header or len(tabs)!=1:raise UIError('WOC_PROFILE_UNSUPPORTED','Account article list is unavailable')
+        active='active' in classes(tabs[0]);items=[]
+        def add(n,label,kind,rect=None):
+            clip=intersect(rect or n['rect'],viewport)
+            if clip[2]<4 or clip[3]<4 or not showing(n):return
+            items.append(dict(title=label,kind=kind,_target=dict(path=n['path'],label=label,kind=kind,rect=clip)))
+        if not active:add(tabs[0],'文章','articles_tab')
+        if active and len(lists)==1:
+            for n in nodes:
+                if 'article-item' not in classes(n) or n['parent']!=lists[0]['path']:continue
+                bodies=[b for b in nodes if b['parent']==n['path'] and 'article-item__body' in classes(b)]
+                titles=[t for t in nodes if any(t['parent']==b['path'] for b in bodies) and t['role']=='static' and t['name']]
+                if len(titles)!=1:continue
+                title=' '.join(titles[0]['name'].split())
+                add(n,title,'article',titles[0]['rect'])
+        items.sort(key=lambda item:(item['_target']['rect'][1],item['_target']['rect'][0]))
+        view=dict(pid=self.pid,window_id=int(self.window),frame=state['_controls']['frame']['rect'],viewport=viewport,
+                  at_top=header['rect'][1]>=viewport[1]-3,position=max(0,viewport[1]-header['rect'][1]),
+                  at_bottom=bool(lists) and lists[0]['rect'][1]+lists[0]['rect'][3]<=viewport[1]+viewport[3]+3)
+        return dict(app='wechat',surface='profile',author=name,username=username,followed=True,articles_tab=active,view=view,
+                    items=[dict(i) for i in items],_items=items,
+                    _identity=dict(window=state['_identity'],document_id=doc['document_id'],username=username))
+
     def article_observe(self):
         state=self.observe()
         if not state['open']:raise UIError('WOC_BROWSER_NOT_OPEN','Open the article with the client open-url workflow first')
@@ -150,31 +244,16 @@ class Browser(Desktop):
         docs=[d for d in state['documents'] if not d['busy']]
         if len(docs)!=1:raise UIError('WOC_ARTICLE_UNSUPPORTED','Expected one loaded article document')
         doc=docs[0];url=article_url(doc.get('url') or '')
-        a='org.a11y.atspi.Accessible';p='org.freedesktop.DBus.Properties'
-        queue=[(self.service,doc['document_id'])];nodes=[];seen=set()
-        for service,path in queue:
-            if (service,path) in seen or path.endswith('/null'):continue
-            seen.add((service,path))
-            if len(seen)>1600:raise UIError('WOC_UI_INCOMPLETE','Article tree exceeds observation budget')
-            role=str(self.call(service,path,a,'GetRoleName'))
-            # Comments can contain their own likes; stop at the known toolbar's
-            # buttons after collecting their attributes, never act on page text.
-            if role in ('push button','dialog','alert'):
-                bits=sum(int(v)<<(32*i) for i,v in enumerate(self.call(service,path,a,'GetState')))
-                attrs=dict(self.call(service,path,a,'GetAttributes'))
-                name=str(self.call(service,path,p,'Get',a,'Name'))
-                rect=[int(v) for v in self.call(service,path,'org.a11y.atspi.Component','GetExtents',self.dbus.UInt32(0))]
-                n=dict(path=path,service=service,role=role,name=name,attrs=attrs,bits=bits,rect=rect)
-                if role in ('dialog','alert') and showing(n):raise UIError('WOC_DIALOG_OPEN','Resolve the article dialog first')
-                nodes.append(n)
-            queue.extend((str(s),str(r)) for s,r in self.call(service,path,a,'GetChildren'))
+        doc,nodes=self.document_nodes(state)
         controls=reaction_controls(nodes)
         frame=state['_controls']['frame']['rect']
         for control in controls.values():
             x,y,w,h=control['node']['rect'];fx,fy,fw,fh=frame
             if w<4 or h<4 or not (fx<=x and fy+40<=y and x+w<=fx+fw and y+h<=fy+fh):
                 raise UIError('WOC_ARTICLE_UNSUPPORTED','Article reaction is outside the browser viewport; inspect with Cua')
-        return dict(app='wechat',surface='article',title=doc['title'],url=url,
+        viewport=next(n['rect'] for n in nodes if n['path']==doc['document_id'])
+        view,author=article_layout(nodes,viewport,frame,self.pid,self.window)
+        return dict(app='wechat',surface='article',title=doc['title'],url=url,view=view,author=author,
                     reactions={k:dict(active=v['active'],label=v['label']) for k,v in controls.items()},
                     _identity=dict(window=state['_identity'],document_id=doc['document_id'],url=url),_controls=controls)
 

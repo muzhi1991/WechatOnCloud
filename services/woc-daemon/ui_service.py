@@ -18,13 +18,14 @@ import time
 from wechat_ui import UIError
 
 FIELDS={
+    'browser_profile_state':set(), 'browser_profile_open':{'target_ref'},
     'browser_article_state':set(), 'browser_article_react':{'article_ref','expected_url','reaction','request_id'},
     'browser_state':set(), 'browser_open_url':{'window_ref','url'},
     'ui_state':set(), 'navigate':{'page'}, 'ui_search':{'scope','query'},
     'open_item':{'target_ref'}, 'fill_text':{'expected_chat','text','expected_draft'},
     'send_draft':{'expected_chat','expected_text','request_id'}, 'ui_request_status':{'request_id'},
 }
-READS={'ui_state','ui_request_status','browser_state','browser_article_state'}
+READS={'ui_state','ui_request_status','browser_state','browser_article_state','browser_profile_state'}
 RECEIPTS={'send_draft','browser_article_react'}
 
 
@@ -115,17 +116,29 @@ class UIService:
                     pending=dict(ok=False,code='WOC_ACTION_UNCERTAIN',error='Action may have started; inspect before retry',execution='unknown')
                     db.execute('INSERT INTO requests VALUES(?,?,?,?,?)',(owner,body['request_id'],digest,json.dumps(pending),now))
             payload=dict(body)
+            if op=='browser_profile_open':
+                ref=self.refs.get(body['target_ref'])
+                if not ref or ref['owner']!=owner or ref.get('kind')!='profile_item':
+                    raise UIError('WOC_UI_STALE','Profile item expired or belongs to another caller')
+                payload=dict(_identity=ref['identity'],_target=ref['target'])
             if op=='browser_article_react':
                 payload=dict(_identity=ref['identity'],expected_url=body['expected_url'],reaction=body['reaction'])
             if op=='open_item':
                 ref=self.refs.get(body['target_ref'])
-                if not ref or ref['owner']!=owner or ref.get('kind') in ('browser','article'): raise UIError('WOC_UI_STALE','Item reference expired or belongs to another caller; observe again')
+                if not ref or ref['owner']!=owner or ref.get('kind') is not None: raise UIError('WOC_UI_STALE','Item reference expired or belongs to another caller; observe again')
                 payload={'_target':ref['target'],'_identity':ref['identity']}
             if op=='browser_open_url':
                 ref=self.refs.get(body['window_ref'])
                 if not ref or ref['owner']!=owner or ref.get('kind')!='browser':raise UIError('WOC_UI_STALE','Browser reference expired or belongs to another caller; observe again')
                 payload={'_identity':ref['identity'],'url':body['url']}
             result=self.runner(op,payload)
+            if op=='browser_profile_state' and result.get('surface')=='profile':
+                identity=result.pop('_identity');result.pop('_items',None)
+                if len(self.refs)>12800:self.refs.clear()
+                for item in result['items']:
+                    target=item.pop('_target');ref=secrets.token_hex(16)
+                    self.refs[ref]=dict(owner=owner,kind='profile_item',identity=identity,target=target,expires=now+60)
+                    item['target_ref']=ref
             if op=='browser_article_state' and result.get('surface')=='article':
                 identity=result.pop('_identity');result.pop('_controls',None)
                 if len(self.refs)>12800:self.refs.clear()

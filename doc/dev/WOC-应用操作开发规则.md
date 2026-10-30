@@ -46,7 +46,7 @@ Agent / Skill → 原生 Cua MCP → 受管 Cua 网关 → cua-spacesd
 | 任务 | daemon / 数据层 | 客户端 Skill |
 | --- | --- | --- |
 | 打开公众号 URL（已实现） | `browser_state`；`navigate(page="web_search")`；`browser_open_url(window_ref,url)` | `open-url` 脚本：获锁 → 查询 → 缺窗口时进入搜一搜 → 提交 URL → 只读观察 → 释放 |
-| 公众号文章点赞/爱心（已实现） | `browser_article_state`；`browser_article_react(article_ref,expected_url,reaction,request_id)`，只确保点亮当前文章的一个反应 | `react-article` 脚本：获锁 → 核对文章 → 逐项调用并只读验证 → 释放；找作者/选另一篇文章交给 Agent/Cua，详见[实施说明](WOC-WeChat-公众号文章互动.md) |
+| 公众号文章点赞/爱心（已实现） | `browser_article_state`；`browser_article_react(article_ref,expected_url,reaction,request_id)`，只确保点亮当前文章的一个反应 | `react-article` 脚本：获锁 → 核对文章 → 逐项调用并只读验证 → 释放；已关注公众号查找/有界选文/分段浏览由同一客户端脚本组合原子接口和原生 Cua 滚动，详见[实施说明](WOC-WeChat-公众号文章互动.md) |
 | 给联系人/群发文本（已实现） | 数据查询；页面观察/导航/搜索/打开项；核对草稿的 fill/send | 解析准确目标；当前可见就打开，否则搜索；填入、核对、发送、检查收据；不逐屏翻列表 |
 | 导出本地尚未下载的视频（分层示例，未实现完整 UI 编排） | wx-cli/daemon 返回本地文件缺失，不自动点击下载 | Agent 在锁内定位消息并触发下载，或调用以后已有的原子操作；准备完成后再调用导出。固定流程成熟后才放入 Skill 脚本 |
 

@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -159,14 +161,170 @@ class Client:
         if release_error:result['release_warning']=release_error
         return result
 
-    def react_article(self,url,reaction,request_id):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{16,120}',request_id):
+    def check_control(self):
+        state=self.control('status')
+        if not state.get('mine') or state.get('lock_id')!=self.epoch:
+            raise Problem({'code':'WOC_LOCK_EXPIRED','error':'Control changed or expired; workflow stopped without reacquiring'})
+
+    def cua(self,name,args):
+        if not getattr(self,'cua_endpoint',None):
+            rows=self.control('machines')['machines'];matches=[m for m in rows if m['id']==self.machine]
+            if len(matches)!=1:raise Problem({'code':'WOC_MACHINE_NOT_FOUND','error':'No managed Cua endpoint'})
+            self.cua_endpoint=matches[0]['endpoint']
+        env=dict(os.environ,CUA_ENV_TOKEN=Path(self.config['tokenFile']).read_text().strip())
+        if self.config.get('cuaHome'):env['CUA_HOME']=self.config['cuaHome']
+        args=dict(args,session='woc-wechat-reading-'+self.machine)
+        try:
+            p=subprocess.run(['cua','spacesd','call',self.cua_endpoint,'DriverService/CallTool',
+                              json.dumps({'name':name,'argumentsJson':json.dumps(args)})],env=env,
+                             capture_output=True,text=True,timeout=15)
+            if p.returncode:raise ValueError('RPC failed')
+            r=json.loads(p.stdout);data=json.loads(r.get('structuredJson','{}'))
+        except (OSError,ValueError,subprocess.TimeoutExpired):
+            raise Problem({'code':'WOC_CUA_RESULT_UNKNOWN','error':'Cua result unavailable; inspect before retry','execution':'unknown'})
+        if r.get('isError') or data.get('effect')=='refused' or data.get('code'):
+            raise Problem({'code':'WOC_CUA_REFUSED','error':'Cua refused the operation','detail':data})
+        return data
+
+    def scroll_page(self,state,direction,amount):
+        view=state.get('view')
+        if not view:raise Problem({'code':'WOC_READING_UNSUPPORTED','error':'Page layout is not available'})
+        self.check_control()
+        shot=self.cua('get_window_state',dict(pid=view['pid'],window_id=view['window_id'],include_accessibility_tree=False))
+        bounds=shot.get('window_bounds',{})
+        frame=view['frame'];viewport=view['viewport']
+        if not shot.get('screenshot_frame_valid') or any(abs(bounds.get(k,-9999)-v)>2 for k,v in zip(('x','y','width','height'),frame)):
+            raise Problem({'code':'WOC_UI_STALE','error':'Cua screenshot geometry differs from the observed page'})
+        self.check_control()
+        target=dict(kind='window',pid=view['pid'],window_id=view['window_id'])
+        self.cua('scroll',dict(target=target,x=viewport[0]-frame[0]+viewport[2]/2,
+                              y=viewport[1]-frame[1]+viewport[3]/2,direction=direction,
+                              by='line',amount=amount,delivery_mode='foreground'))
+        time.sleep(.2)
+
+    def page_top(self,op,identity):
+        for _ in range(8):
+            state=self.query(op)
+            if identity(state)!=self.page_identity:raise Problem({'code':'WOC_UI_STALE','error':'Page changed while returning to top'})
+            if state['view']['at_top']:return state
+            before=state['view']['position'];self.scroll_page(state,'up',50)
+            after=self.query(op)
+            if identity(after)!=self.page_identity:raise Problem({'code':'WOC_UI_STALE','error':'Page changed after scrolling'})
+            if after['view']['position']>=before and not after['view']['at_top']:
+                raise Problem({'code':'WOC_SCROLL_UNCONFIRMED','error':'Content did not move toward the top'})
+        raise Problem({'code':'WOC_TOP_NOT_REACHED','error':'Top navigation budget exhausted'})
+
+    def find_article(self,author,title=None):
+        # Only the local Official Accounts section is actionable; native search
+        # may show network suggestions but we never select them.
+        self.query('navigate',page='contacts')
+        for _ in range(8):
+            time.sleep(.25);state=self.state()
+            if (state['page'] in ('contacts','contact_profile','search_results') and
+                    (state['data'].get('search') or {}).get('scope')=='contacts' and not state.get('dialog')):break
+        else:raise Problem({'code':'WOC_WRONG_PAGE','error':'Contacts page has not settled; no search submitted'})
+        self.query('ui_search',scope='contacts',query=author)
+        for _ in range(8):
+            time.sleep(.25);state=self.state()
+            matches=[i for i in state['data'].get('items',[]) if i['kind']=='official' and i['label']==author]
+            if matches:break
+        if len(matches)>1:raise Problem({'code':'WOC_TARGET_AMBIGUOUS','error':'Several followed accounts have this name'})
+        if not matches:return dict(found=False,reason='followed_account_not_found',author=author,scrolls=0)
+        self.query('open_item',target_ref=matches[0]['target_ref'])
+        for _ in range(8):
+            time.sleep(.25);state=self.state()
+            choices=[i for i in state['data'].get('items',[]) if i['kind']=='official_profile' and i['label']==author]
+            if state['page']=='official_chat' and len(choices)==1:break
+        else:raise Problem({'code':'WOC_PROFILE_NOT_OPEN','error':'Followed-account conversation is not ready'})
+        self.query('open_item',target_ref=choices[0]['target_ref'])
+        for _ in range(10):
+            time.sleep(.3)
+            try:profile=self.query('browser_profile_state')
+            except Problem as e:
+                if e.result.get('code') not in ('WOC_PROFILE_NOT_OPEN','WOC_PROFILE_UNSUPPORTED'):raise
+                continue
+            if profile['author']==author:break
+        else:raise Problem({'code':'WOC_PROFILE_NOT_OPEN','error':'Expected followed-account profile did not open'})
+        self.page_identity=profile['username']
+        profile=self.page_top('browser_profile_state',lambda s:s['username'])
+        if not profile['articles_tab']:
+            tabs=[i for i in profile['items'] if i['kind']=='articles_tab']
+            if len(tabs)!=1:raise Problem({'code':'WOC_PROFILE_UNSUPPORTED','error':'Articles tab is unavailable'})
+            self.query('browser_profile_open',target_ref=tabs[0]['target_ref']);time.sleep(.3)
+        wanted=' '.join(title.split()) if title else None;seen=[]
+        for page in range(4):
+            profile=self.query('browser_profile_state')
+            if profile['username']!=self.page_identity:raise Problem({'code':'WOC_UI_STALE','error':'Account changed during search'})
+            entries=[i for i in profile['items'] if i['kind']=='article']
+            seen.extend(i['title'] for i in entries if i['title'] not in seen)
+            found=[i for i in entries if wanted in i['title']] if wanted else entries[:1]
+            if found:
+                chosen=found[0];self.query('browser_profile_open',target_ref=chosen['target_ref'])
+                for _ in range(12):
+                    time.sleep(.3)
+                    try:article=self.query('browser_article_state')
+                    except Problem as e:
+                        if e.result.get('code') in ('WOC_ARTICLE_UNSUPPORTED','WOC_BROWSER_NOT_OPEN'):continue
+                        raise
+                    if ' '.join(article['title'].split())==chosen['title'] and article.get('author')==author:
+                        return dict(found=True,author=author,title=article['title'],url=article['url'],scrolls=page,
+                                    selection='title_contains' if wanted else 'latest_in_profile_order')
+                raise Problem({'code':'WOC_ARTICLE_MISMATCH','error':'Opened article title/author did not match'})
+            if not wanted or page==3 or profile['view']['at_bottom']:break
+            before=profile['view']['position']
+            self.scroll_page(profile,'down',max(1,min(6,int(profile['view']['viewport'][3]/120))))
+            after=self.query('browser_profile_state')
+            if after['view']['position']<=before:break
+        return dict(found=False,reason='article_not_found',author=author,title=title,scrolls=page,visible_titles=seen)
+
+    def read_article(self,url,duration):
+        state=self.query('browser_article_state')
+        if state['url']!=url:raise Problem({'code':'WOC_ARTICLE_MISMATCH','error':'Use the verified stable article URL before reading'})
+        if not state.get('view'):raise Problem({'code':'WOC_READING_UNSUPPORTED','error':'Article body bounds are unavailable'})
+        self.page_identity=url;state=self.page_top('browser_article_state',lambda s:s['url'])
+        start=time.monotonic();deadline=start+duration;scrolls=0
+        height=state['view']['viewport'][3];step=max(1,min(5,int(height*.8/120)))
+        operation_cost=3.0
+        while time.monotonic()<deadline:
+            remaining_steps=max(1,math.ceil(state['view']['remaining']/(step*120)))
+            pause=10 if state['view']['at_bottom'] else max(1,min(10,(deadline-time.monotonic())/(remaining_steps+1)-operation_cost))
+            until=min(deadline,time.monotonic()+pause)
+            while time.monotonic()<until:
+                time.sleep(max(0,min(2,until-time.monotonic())));self.check_control()
+            operation_start=time.monotonic()
+            after=self.query('browser_article_state')
+            if after['url']!=url or not after.get('view') or abs(after['view']['position']-state['view']['position'])>3:
+                raise Problem({'code':'WOC_UI_STALE','error':'Article or scroll position changed during the pause; stopped'})
+            state=after
+            if time.monotonic()>=deadline:break
+            if state['view']['at_bottom']:continue
+            before=state['view']['position'];self.scroll_page(state,'down',step);scrolls+=1
+            after=self.query('browser_article_state')
+            if after['url']!=url or not after.get('view'):raise Problem({'code':'WOC_UI_STALE','error':'Article changed after scrolling'})
+            delta=after['view']['position']-before
+            if delta<=0 or delta>height*.95:
+                raise Problem({'code':'WOC_SCROLL_UNCONFIRMED','error':'Reading scroll did not move by a bounded overlapping segment'})
+            state=after;operation_cost=max(1,time.monotonic()-operation_start)
+        return dict(duration_seconds=round(time.monotonic()-start,1),scrolls=scrolls,
+                    reached_body_end=state['view']['at_bottom'],verification='viewport_browsing_only')
+
+    def react_article(self,url,reaction,request_id,read_first=False,duration=75,author=None,title=None):
+        if reaction and not re.fullmatch(r'[a-zA-Z0-9_-]{16,120}',request_id):
             raise Problem({'code':'WOC_INVALID_ARGUMENT','error':'Use a unique 16..120 character request ID'})
+        if read_first and (type(duration)!=int or not 60<=duration<=90):raise Problem({'code':'WOC_INVALID_ARGUMENT','error':'Reading duration must be 60..90 seconds'})
         lease=self.control('acquire')
         if not lease.get('mine'):raise Problem({'code':'WOC_LOCK_BUSY','error':'Control not acquired'})
         self.epoch=lease['lock_id'];failure=None;release_error=None;steps=[]
         try:
-            for kind in (['like','wow'] if reaction=='both' else [reaction]):
+            selection=self.find_article(author,title) if author else dict(found=True,url=url)
+            reading=None
+            if selection['found']:
+                url=selection['url']
+                if read_first:
+                    reading=self.read_article(url,duration)
+                    if reaction and not reading['reached_body_end']:
+                        raise Problem({'code':'WOC_ARTICLE_NOT_FINISHED','error':'Time budget ended before the article body ended; no reaction submitted','reading':reading})
+            for kind in ((['like','wow'] if reaction=='both' else [reaction]) if reaction and selection['found'] else []):
                 before=self.query('browser_article_state')
                 action=self.query('browser_article_react',article_ref=before['article_ref'],expected_url=url,
                                   reaction=kind,request_id=request_id+'-'+kind)
@@ -180,8 +338,9 @@ class Client:
                         step['verified_active']=True;break
                 if not step['verified_active']:
                     raise Problem({'code':'WOC_REACTION_UNCONFIRMED','error':'Reaction input was submitted but active state is unconfirmed; inspect, do not repeat','execution':'unknown'})
-            result=dict(ok=True,article={'title':after['title'],'url':after['url']},steps=steps,
-                        verification='ui_active_observed',verification_note='Observed UI state, not an independent server-persistence receipt.')
+            result=dict(ok=True,selection=selection,reading=reading,steps=steps,
+                        verification='ui_active_observed' if steps else 'not_found' if not selection['found'] else 'browsed' if reading else 'article_opened')
+            if steps:result['article']={'title':after['title'],'url':after['url']}
         except Problem as e:
             failure=e;failure.result['steps']=steps
         finally:
@@ -197,7 +356,10 @@ class Client:
     def workflow(self,args):
         if args.operation=='state':return self.state()
         if args.operation=='article-state':return self.query('browser_article_state')
-        if args.operation=='react-article':return self.react_article(args.url,args.reaction,args.request_id)
+        if args.operation in ('react-article','read-article','open-article'):
+            return self.react_article(getattr(args,'url',None),getattr(args,'reaction',None),getattr(args,'request_id',None),
+                                      read_first=args.operation=='read-article' or getattr(args,'read_first',False),
+                                      duration=getattr(args,'duration',75),author=getattr(args,'author',None),title=getattr(args,'title',None))
         if args.operation=='open-url':return self.open_url(args.url)
         target=self.resolve(args.chat,args.source)
         if args.operation=='send-text':
@@ -244,14 +406,24 @@ def main():
     sub=p.add_subparsers(dest='operation',required=True);sub.add_parser('state')
     sub.add_parser('article-state',help='Read the current article and toolbar reaction states without a lock')
     r=sub.add_parser('react-article',help='Enable authorized article reactions; never cancel or blindly retry')
-    r.add_argument('--url',required=True,help='Expected article URL; open it with open-url first if needed')
+    target=r.add_mutually_exclusive_group(required=True)
+    target.add_argument('--url',help='Verified stable URL of the currently open article')
+    target.add_argument('--author',help='Exact name of a followed public account; defaults to its latest article')
+    r.add_argument('--title',help='Article title keyword (substring); search the first screen and at most three downward screens')
+    r.add_argument('--read-first',action='store_true');r.add_argument('--duration',type=int,default=75)
     r.add_argument('--reaction',required=True,choices=['like','wow','both'],help='like=赞; wow=爱心/在看 (visible to friends); both=both')
     r.add_argument('--request-id',required=True,help='Unique 16..120 character action ID; reuse after an interrupted attempt')
+    read=sub.add_parser('read-article',help='Browse the article from top to body end for 60..90 seconds without reacting')
+    target=read.add_mutually_exclusive_group(required=True);target.add_argument('--url');target.add_argument('--author')
+    read.add_argument('--title');read.add_argument('--duration',type=int,default=75)
+    find=sub.add_parser('open-article',help='Find a followed account and open its latest or keyword-matched article')
+    find.add_argument('--author',required=True);find.add_argument('--title')
     u=sub.add_parser('open-url');u.add_argument('--url',required=True)
     for op in ('open-chat','send-text'):
         s=sub.add_parser(op);s.add_argument('--chat',required=True);s.add_argument('--source',choices=['sessions','contacts','groups'],default='sessions')
         if op=='send-text':s.add_argument('--text-file',required=True);s.add_argument('--request-id',required=True)
     args=p.parse_args()
+    if getattr(args,'title',None) and not getattr(args,'author',None):p.error('--title requires --author')
     if not args.config:p.error('--config or WOC_CLIENT_CONFIG is required')
     try:
         config=json.loads(Path(args.config).read_text());c=Client(config,args.machine)
