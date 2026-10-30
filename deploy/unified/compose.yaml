@@ -23,6 +23,9 @@ services:
       WOC_DESKTOP_IMAGE: sha256:ce67703372b350bd63a9642a52e78a3daff2b34e752f588ec29656557c7e4f05
       WOC_CUA_ENABLED: "1"
       WOC_CONTROL_ENABLED: "1"
+      WOC_AGENT_PUBLIC_URL: http://192.168.31.101:36084
+      WOC_AGENT_CLIENTS_FILE: /data/panel/agent-clients.json
+      WOC_AGENT_PROVISION_TOKEN_FILE: /run/secrets/woc-agent-provision
       WOC_CLIENTS_FILE: /run/secrets/woc-clients.json
       WOC_READ_TARGETS_FILE: /run/secrets/woc-read/targets.json
       WOC_LIFECYCLE_ENABLED: "1"
@@ -42,6 +45,7 @@ services:
       WOC_DISABLE_IMAGE_PRUNE: "1"
       TZ: Asia/Shanghai
     volumes:
+      - /root/woc-cua-control/deploy/cua-control/secrets/woc-agent-provision:/run/secrets/woc-agent-provision:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/woc-cua-control/deploy/cua-control/secrets/woc-clients.json:/run/secrets/woc-clients.json:ro
       - /root/woc-cua-control/deploy/read-daemon/secrets:/run/secrets/woc-read:ro

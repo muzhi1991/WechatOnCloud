@@ -37,6 +37,30 @@ flowchart TB
         CUA -->|按登记地址选择机器| REG
     end
 
+    subgraph AGENT["独立 woc-agent 容器"]
+        AP["Paseo daemon + Pi
+共享 workspace，多会话"]
+        BR["WOC 登录认证代理 :36084
+保留 Paseo HTTP / WebSocket"]
+        HP["agent.open.before 插件
+每会话稳定 WOC 身份"]
+        AC["原生 Cua MCP + WOC MCP
+原有三个 Skills"]
+        AS["复用 cua-master-sync reconcile
+每会话 CUA_HOME + spaces add"]
+        BR --> AP --> HP
+        AP --> AC
+        AC --> AS
+    end
+    BROWSER -->|AI 页面 iframe| BR
+    BR -->|校验 WOC 登录| API
+    HP -->|受信任服务凭证注册会话身份| API
+    AC -->|WOC HTTP / machine_id| API
+    AS -->|快照与独立端口登记| API
+    AC -->|原生 Cua 请求，按端口选机器| G0
+    AC --> G1
+    AC --> G2
+
     subgraph PANEL["llm server：同一个 WOC 面板后端进程"]
         API["HTTP :36083 对外入口\n机器快照 / 锁 API / 微信业务 API"]
         G0["Cua 网关监听 :13340\n固定映射浏览器"]
@@ -162,12 +186,22 @@ WOC MCP 当前暴露机器列表、锁状态/申请/释放，以及微信 health
 
 当前 MCP 适配器还提供 `wechat://MACHINE_ID/messages` 资源及订阅。在存在订阅时，它轮询远端 revision 变化并发出 MCP `notifications/resources/updated`；这是重新查询的提示，不是逐条消息推送。没有业务事件序号、离线补发或自动启动模型的保证。微信未读是会话级状态，不代表 Agent 已处理或未处理。
 
+## 网页 AI 助手接入
+
+AI 助手运行在独立的 `woc-agent` 容器，Paseo 管理会话、历史和 Pi 进程，WOC 仍管理机器和写锁。它是另一台客户端电脑，不替代应用容器里的 `cua-spacesd` / `woc-daemon`，也不替代 Mac 上的同步程序。当前只有管理员可访问共享 Agent 工作区，所有会话可使用全部 WOC 机器。
+
+浏览器通过 WOC 的 AI 入口嵌入适配后的 Paseo Web。认证代理复用 WOC 登录，Paseo 的私有密码不发给浏览器。每个会话在打开/恢复时获得独立 WOC 身份和 `CUA_HOME`，Cua MCP 启动时复用既有 reconcile 登记机器，并定期刷新；锁仍由客户端 Skill 显式申请/释放。Agent 会话不是互相隔离的操作系统用户，workspace 文件共享。
+
+简化界面、Paseo 插件、容器及认证代理均维护在独立 [paseo-fork 的 WOC 分支](https://github.com/muzhi1991/paseo-fork/tree/feat/woc-embedded)。本仓库只保留控制台入口及受信任身份注册接口。部署及完整设计见该 fork 的 `docs/woc-integration.md`；不要把 Agent 编排搬入 WOC 网关或应用 daemon。
+
 ## 7. 代码与部署位置
 
 下列代码链接相对本文件所在目录。
 
 | 部分 | 代码 / 说明 |
 | --- | --- |
+| AI 控制台入口 | [Agent.tsx](../../panel/web/src/pages/Agent.tsx) |
+| 受信任 Agent 身份注册 | [agent.ts](../../panel/server/src/integrations/agent.ts) |
 | 本机 WOC MCP，stdio | [server.mjs](../../integrations/woc-mcp/server.mjs) |
 | WOC Skill，已链接到本机 Skill 目录 | [woc-control/SKILL.md](../../integrations/skills/woc-control/SKILL.md) |
 | 本机机器同步程序 | [sync.mjs](../../integrations/cua-master-sync/sync.mjs) |

@@ -10,10 +10,13 @@ export function authenticateClient(token: string, clients: ManagedClient[]): Man
     && Array.isArray(c.machines) && timingSafeEqual(hash, Buffer.from(c.tokenHash, 'hex')));
 }
 export function configuredClient(token: string): ManagedClient | undefined {
-  const path = process.env.WOC_CLIENTS_FILE;
-  if (!path) return;
-  try { return authenticateClient(token, JSON.parse(readFileSync(path, 'utf8'))); }
-  catch { return; } // A missing/invalid identity file never grants access.
+  for (const path of [process.env.WOC_CLIENTS_FILE, process.env.WOC_AGENT_CLIENTS_FILE]) {
+    if (!path) continue;
+    try {
+      const client = authenticateClient(token, JSON.parse(readFileSync(path, 'utf8')));
+      if (client) return client;
+    } catch { /* An invalid identity store grants no access. */ }
+  }
 }
 export const clientCanAccess = (client: ManagedClient, id: string) => client.machines.includes('*') || client.machines.includes(id);
 export const clientActor = (client: ManagedClient): Actor => ({ kind: 'agent', id: `client:${client.id}`, label: client.label.slice(0, 64) });

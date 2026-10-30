@@ -1,3 +1,4 @@
+import Agent from './pages/Agent';
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './auth';
@@ -143,6 +144,7 @@ export default function AppShell() {
         <main className="workspace">
           <Routes>
             <Route path="/" element={<HomeView onOpenMenu={openMenu} onChangePassword={openChangePassword} />} />
+            <Route path="/agent" element={<Agent onOpenMenu={openMenu} />} />
             <Route path="/admin" element={<Admin onOpenMenu={openMenu} onChangePassword={openChangePassword} />} />
             <Route path="/i/:id" element={<InstanceView onOpenMenu={openMenu} />} />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -191,6 +193,9 @@ function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggl
           <span className="sb-ic">{Icon.home}</span>
           {!collapsed && <span className="sb-label">主页</span>}
         </button>
+        {isAdmin && <button className={'sb-item' + (loc.pathname === '/agent' ? ' on' : '')} onClick={() => go('/agent')} title="AI 助手">
+          <span className="sb-ic">✦</span>{!collapsed && <span className="sb-label">AI 助手</span>}
+        </button>}
       </nav>
 
       {!collapsed && <div className="sb-section">实例</div>}

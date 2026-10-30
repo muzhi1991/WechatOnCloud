@@ -1,3 +1,4 @@
+import { registerPaseoAgentRoutes } from './integrations/agent.js';
 import { ControlError } from './control/leases.js';
 import { desktopImage, validateMode, instanceMode } from './desktop.js';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
@@ -255,6 +256,16 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): User | null {
   }
   return u;
 }
+app.get('/api/agent', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  reply.header('cache-control', 'no-store');
+  const endpoint = process.env.WOC_AGENT_PUBLIC_URL;
+  if (!endpoint) return reply.code(503).send({ error: 'AI 助手尚未配置' });
+  const url = new URL(endpoint);
+  url.searchParams.set('woc', '1');
+  return { url: url.href };
+});
+registerPaseoAgentRoutes(app);
 registerCuaRoutes(app, (req, reply) => !!requireAdmin(req, reply));
 registerAgentControlRoutes(app);
 registerReadRoutes(app, {
