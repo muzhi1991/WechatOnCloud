@@ -15,6 +15,8 @@ import { watchdogDecision } from './lifecycle/watchdog.js';
 import { registerClientControlRoutes } from './control/client-routes.js';
 import { registerReadRoutes } from './business/routes.js';
 import { registerUiRoutes } from './business/ui-routes.js';
+import { registerControlRequestRoutes } from './control/request-routes.js';
+import { controlRequests } from './control/runtime.js';
 import { registerAgentControlRoutes } from './control/routes.js';
 import { managed, ensureControl, leases, requestActor, requestEpoch, humanActor, humanWrite, vncAuthorization, trackControlSocket, startControlGateways } from './control/runtime.js';
 import { cuaConfig, watchdogInterval } from './cua/config.js';
@@ -1097,6 +1099,16 @@ app.get('/api/instances/:id/download', async (req, reply) => {
 // 当前操作者每隔几秒 beat 续约；TTL 内他人只读（前端盖只读遮罩）。空闲超 TTL 自动释放。
 const CONTROL_TTL = 10_000; // ms：超过则视为已空闲，可被接管
 const controlHolders = new Map<string, { userId: string; username: string; at: number }>();
+registerControlRequestRoutes(app, {
+  leases, requests: controlRequests,
+  authorize(req, reply, id) {
+    const user = requireAuth(req, reply); if (!user) return;
+    if (!userCanAccess(user, id)) { reply.code(403).send({ error: '无权访问该实例' }); return; }
+    if (!managed(findInstance(id))) { reply.code(400).send({ error: '该实例未启用受管控制' }); return; }
+    return { actor: requestActor(user, req), admin: user.role === 'admin' };
+  },
+  ensure: async id => { await ensureControl(findInstance(id)!); },
+});
 
 // 续约/认领：无人持有、已超时、或本来就是我 → 我成为操作者；否则返回当前操作者。
 app.post('/api/instances/:id/control/beat', async (req, reply) => {
@@ -1108,7 +1120,8 @@ app.post('/api/instances/:id/control/beat', async (req, reply) => {
   if (managed(inst)) {
     await ensureControl(inst);
     const actor = requestActor(u, req), status = leases.status(id, actor);
-    return status.mine ? leases.renew(id, actor, requestEpoch(req)) : status;
+    if (status.mine) leases.renew(id, actor, requestEpoch(req));
+    return controlRequests.status(id, actor);
   }
   const now = Date.now();
   const h = controlHolders.get(id);
@@ -1126,20 +1139,20 @@ app.get('/api/instances/:id/control', async (req, reply) => {
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const inst = findInstance(id)!;
-  if (managed(inst)) { await ensureControl(inst); return leases.status(id, requestActor(u, req)); }
+  if (managed(inst)) { await ensureControl(inst); return controlRequests.status(id, requestActor(u, req)); }
   const h = controlHolders.get(id);
   if (!h || Date.now() - h.at > CONTROL_TTL) return { free: true, mine: false, holder: null };
   return { free: false, mine: h.userId === u.id, holder: h.username };
 });
 
-// 主动接管（"申请控制"）：强制把操作权抢过来。
+// 无人控制则获得控制；有持有人时提交申请，不能隐式强制接管。
 app.post('/api/instances/:id/control/take', async (req, reply) => {
   const u = requireAuth(req, reply);
   if (!u) return;
   const id = (req.params as any).id;
   if (!userCanAccess(u, id)) return reply.code(403).send({ error: '无权访问该实例' });
   const inst = findInstance(id)!;
-  if (managed(inst)) { await ensureControl(inst); return leases.take(id, requestActor(u, req), true); }
+  if (managed(inst)) { await ensureControl(inst); return controlRequests.request(id, requestActor(u, req)); }
   controlHolders.set(id, { userId: u.id, username: u.username, at: Date.now() });
   return { mine: true, holder: u.username };
 });

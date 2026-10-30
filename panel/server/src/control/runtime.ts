@@ -3,10 +3,13 @@ import type { Socket } from 'node:net';
 import type { FastifyRequest } from 'fastify';
 import { cuaRegistry } from '../cua/registry.js';
 import { cuaConfig } from '../cua/config.js';
-import { findInstance, listInstances, type Instance, type User } from '../store.js';
+import { findInstance, findById, userCanAccess, listInstances, type Instance, type User } from '../store.js';
 import { controlExec, controlPauseApp, instanceRuntime, cuaInstanceStatus, controlRuntimeIdentity } from '../docker.js';
 import { ControlLeases, ControlError, type Actor } from './leases.js';
 import { createControlGateway } from './gateway.js';
+import { humanActor } from './actors.js';
+import { ControlRequests } from './requests.js';
+export { humanActor } from './actors.js';
 
 import { lifecycleEnabled, journal, maintenanceState, configureMaintenance, withInputContext, withMaintenance } from '../lifecycle/operations.js';
 
@@ -19,6 +22,13 @@ export const leases = new ControlLeases(Date.now, 30_000, {
   action: (id, actor, epoch, name) => journal?.start(id, 'action', name, { epoch, parent: journal.task(id, epoch), details: { actor: actor.kind } }),
   result: (action, ok) => journal?.finish(action, ok ? 'done' : 'uncertain', ok ? undefined : 'inspect-before-retry'),
 }, idleMs);
+// Web requests currently originate from authenticated humans. Agent requests can
+// use the same model once a client-facing request API and ACL resolver are added.
+export const controlRequests = new ControlRequests(leases, (machine, actor) => {
+  if (actor.kind !== 'human' || !actor.id.startsWith('user:')) return false;
+  const user = findById(actor.id.slice(5));
+  return !!user && !user.disabled && userCanAccess(user, machine);
+});
 export const derived = (id: string, purpose: string) => createHmac('sha256', cuaRegistry!.token(id)).update(purpose).digest('hex');
 export const viewToken = (id: string) => derived(id, 'woc-cua-view-v1');
 export const managed = (inst?: Instance) => controlEnabled && !!inst?.cuaEnabled;
@@ -82,10 +92,6 @@ export async function ensureControl(inst: Instance, duringMaintenance = false) {
     grantAgent: async () => { if (lifecycleEnabled) await controlPauseApp(inst, true); },
     grantHuman: async password => { await kasm(inst, 'update_user', [{ user: 'woc-human', password, write: true, read: true, owner: false }]); },
   }, false, duringMaintenance);
-}
-export function humanActor(u: User, client: unknown): Actor {
-  if (typeof client !== 'string' || !/^[a-f0-9-]{36}$/.test(client)) throw new ControlError('缺少浏览器标签页标识', 400);
-  return { kind: 'human', id: `${u.id}:${client}`, label: `${u.username}（人工）` };
 }
 export function requestActor(u: User, req: FastifyRequest) { return humanActor(u, req.headers['x-woc-client']); }
 export function requestEpoch(req: FastifyRequest) { return String(req.headers['x-woc-epoch'] || ''); }

@@ -112,6 +112,17 @@ export class ControlLeases {
     if (force && actor.kind !== 'human') throw new ControlError('Agent 不能抢占人工控制');
     e.idleManaged = idleManaged;
     this.begin(e, actor);
+    return this.waitForGrant(id, e, actor);
+  }
+  // Consent is checked against the current holder and exact ownership period.
+  // Unlike force takeover, this also permits a future approved agent requester.
+  async transfer(id: string, holder: Actor, epoch: string, next: Actor, idleManaged = false) {
+    const e = this.check(id, holder, epoch);
+    e.idleManaged = idleManaged;
+    this.begin(e, next, 'approved-transfer');
+    return this.waitForGrant(id, e, next);
+  }
+  private async waitForGrant(id: string, e: Entry, actor: Actor) {
     // Long in-flight actions keep handover pending; never claim premature success.
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([e.transition, new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); })]);

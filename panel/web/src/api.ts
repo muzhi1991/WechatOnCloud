@@ -1,23 +1,13 @@
+export interface ControlRequest { id: string; label: string; kind: 'human' | 'agent'; expiresAt: number; mine: boolean; canRespond: boolean }
 export interface ControlStatus {
+  request?: ControlRequest | null;
   free: boolean; mine: boolean; holder: string | null; managed?: boolean;
   state?: 'idle' | 'human' | 'agent' | 'handover' | 'faulted' | 'maintenance'; epoch?: string; pending?: boolean;
 }
-// Keep this page's identity through reload, but not a newly opened tab which
-// may receive a copy of its opener's sessionStorage. Ownership/epoch still come
-// exclusively from the server; restoring an ID never acquires a lock.
-function loadControlClientId() {
-  const key = 'woc_control_reload_client';
-  try {
-    const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
-    const saved = sessionStorage.getItem(key);
-    if (navigation?.type === 'reload' && saved && /^[a-f0-9-]{36}$/.test(saved)) return saved;
-  } catch { /* Storage unavailable: retain isolation with a fresh in-memory ID. */ }
-  const hex = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
-  const id = [hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20)].join('-');
-  try { sessionStorage.setItem(key, id); } catch { /* Privacy mode: no reload restoration. */ }
-  return id;
-}
-export const controlClientId = loadControlClientId();
+// Informational connection identifier retained for Cua/VNC URL compatibility.
+// The server derives human ownership exclusively from the authenticated user.
+const clientHex = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
+export const controlClientId = [clientHex.slice(0,8),clientHex.slice(8,12),clientHex.slice(12,16),clientHex.slice(16,20),clientHex.slice(20)].join('-');
 const controlEpochs = new Map<string, string>();
 export const controlHeaders = (id: string, epoch?: string) => ({ 'x-woc-client': controlClientId, 'x-woc-epoch': epoch ?? controlEpochs.get(id) ?? '' });
 
@@ -493,6 +483,9 @@ export const api = {
   controlStatus: (id: string) => req<ControlStatus>(`/api/instances/${id}/control`),
   controlBeat: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/beat`, { method: 'POST' }),
   controlTake: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/take`, { method: 'POST' }),
+  controlRespond: (id: string, request_id: string, approve: boolean) => req<ControlStatus>(`/api/instances/${id}/control/respond`, { method: 'POST', body: JSON.stringify({ request_id, approve }) }),
+  controlCancel: (id: string, request_id: string) => req<ControlStatus>(`/api/instances/${id}/control/cancel`, { method: 'POST', body: JSON.stringify({ request_id }) }),
+  controlForce: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/force`, { method: 'POST' }),
   controlRelease: (id: string) => req<ControlStatus>(`/api/instances/${id}/control/release`, { method: 'POST' }),
   controlRecover: (id: string) => req<ControlStatus>(`/api/admin/instances/${id}/control/recover`, { method: 'POST' }),
   typeInInstance: (id: string, text: string, epoch?: string) => req(`/api/instances/${id}/type`, { method: 'POST', headers: controlHeaders(id, epoch), body: JSON.stringify({ text }) }),

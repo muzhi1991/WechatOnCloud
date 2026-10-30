@@ -7,6 +7,7 @@ import { useUI } from '../ui';
 import { useAuth } from '../auth';
 import { useInstances } from '../AppShell';
 import { Activity } from '../Activity';
+import { ControlStrip } from '../ControlStrip';
 import { VncAudio } from '../vncAudio';
 
 // KasmVNC noVNC 页面；反代按实例隔离：/desktop/<id>/* → 对应容器，注入凭据。
@@ -1279,6 +1280,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
 
   // 同源 iframe：把键盘焦点交给 VNC，帮助宿主机输入法把合成的字送进去
   const focusFrame = () => {
+    if (inst?.controlManaged && !controlState.current?.mine) return;
     try {
       frameRef.current?.focus();
       frameRef.current?.contentWindow?.focus();
@@ -1448,7 +1450,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           <div className="ws-actions">
             {inst?.mode === 'desktop' && <DesktopControls id={id} frameRef={frameRef} stageRef={stageRef} frameGen={frameGen} readOnly={readOnly} epoch={control?.epoch} pressKey={pressKey} />}
 
-            {inst?.controlManaged && control?.mine && <button className="ws-action" onClick={() => void api.controlRelease(id).then(setControl).catch(e => toast(e.message, 'error'))}>交回控制</button>}
+
             <button
               className="ws-action"
               title="文件传输"
@@ -1510,6 +1512,8 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           </div>
         )}
       </header>
+      {showVnc && inst?.controlManaged && id && <ControlStrip id={id} status={control} admin={isAdmin} onChange={setControl} />}
+      {showVnc && !inst?.controlManaged && readOnly && <div className="control-strip"><span>只读 · {control?.holder}正在控制</span><button className="ws-action" onClick={takeControl}>申请控制</button></div>}
 
       {/* —— 各种态 —— */}
       {!loaded || (probing && !inst) ? (
@@ -1608,6 +1612,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
           <iframe
             ref={frameRef}
             className="iv-frame"
+            tabIndex={readOnly ? -1 : 0}
             src={desktopUrl(id, inst?.controlManaged, control?.epoch, inst?.mode === 'desktop')}
             title={`${appLabel} · 实例桌面`}
             allowFullScreen
@@ -1679,18 +1684,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
             </div>
           )}
 
-          {(inst?.controlManaged ? !control?.mine : control && !control.free && !control.mine) && (
-            <div className="iv-lock">
-              <div className="iv-lock-card">
-                <div className="iv-lock-title">{!control ? "正在确认控制权…" : control.state === "maintenance" ? "维护中，暂停输入；进度见运行记录" : control.state === "handover" ? "正在交接，等待旧操作结束" : control.state === "faulted" ? "控制状态待恢复" : control.holder ? `「${control.holder}」正在操作` : "当前为只读，可申请控制"}</div>
-                <div className="iv-lock-sub">{!control ? "正在同步服务端状态，请稍候。" : "为避免多端互相干扰，你当前为只读模式。"}</div>
-                <button className="btn btn-primary iv-notice-btn" disabled={!control || control.pending || control.state === "faulted"} onClick={takeControl}>
-                  {control ? '申请控制' : '确认中…'}
-                </button>
-                {isAdmin && control?.state === 'faulted' && <button className="btn iv-notice-btn" onClick={() => void api.controlRecover(id).then(setControl).catch(e => toast(e.message, 'error'))}>恢复控制服务</button>}
-              </div>
-            </div>
-          )}
+          {readOnly && frameLoaded && <div className="iv-readonly-input" aria-label="只读桌面" title="只读观看；可在上方申请控制" />}
 
           {showFiles && (
             <div className="iv-files">

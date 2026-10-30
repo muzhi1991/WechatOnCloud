@@ -2107,37 +2107,33 @@ button {
   padding: 16px;
 }
 /* 只读遮罩：他人正在操作时盖住 VNC，拦截键鼠（半透，仍能看到画面） */
-.iv-lock {
+.iv-readonly-input {
   position: absolute;
   inset: 0;
   z-index: 8;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(26, 29, 36, 0.28);
-  -webkit-backdrop-filter: blur(1.5px);
-  backdrop-filter: blur(1.5px);
+  background: transparent;
+  cursor: not-allowed;
 }
-.iv-lock-card {
+.control-strip {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 16px;
   background: var(--surface);
-  border-radius: var(--r-card);
-  box-shadow: var(--crease), 0 8px 30px rgba(var(--shadow) / 0.25);
-  padding: 22px 26px;
-  text-align: center;
-  max-width: 320px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-.iv-lock-title {
-  font-size: 16px;
-  font-weight: 700;
-}
-.iv-lock-sub {
+  border-bottom: 1px solid rgba(var(--shadow) / 0.12);
   font-size: 13px;
-  color: var(--muted);
-  line-height: 1.5;
+}
+.control-status { color: var(--muted); }
+.control-status.is-owner { color: var(--primary, #07883d); }
+.control-hint { color: var(--muted); }
+.control-request { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
+.control-force { margin-left: auto; }
+.control-strip button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 600px) {
+  .control-strip { padding: 8px; }
+  .control-request { width: 100%; margin-left: 0; }
 }
 
 .iv-notice {

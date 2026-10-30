@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ControlLeases, type Actor, type ControlAdapter } from './leases.js';
-const human: Actor = { kind: 'human', id: 'user:tab1', label: 'Human 1' };
-const other: Actor = { ...human, id: 'user:tab2', label: 'Human 2' };
+const human: Actor = { kind: 'human', id: 'user:one', label: 'Human 1' };
+const other: Actor = { ...human, id: 'user:two', label: 'Human 2' };
 const agent: Actor = { kind: 'agent', id: 'task1', label: 'Agent' };
 function fixture() {
   let now=1000; const calls: string[]=[];
@@ -10,7 +10,7 @@ function fixture() {
   const leases=new ControlLeases(()=>now,100);
   return { leases, adapter, calls, advance:()=>{now+=101;} };
 }
-test('same account different tabs compete; old epoch is rejected; agent cannot steal', async()=>{
+test('different users compete; old epoch is rejected; agent cannot steal', async()=>{
   const {leases:l,adapter}=fixture();await l.ensure('a',1,adapter);
   const one=await l.take('a',human);assert.ok(one.mine);assert.equal(l.status('a',other).mine,false);
   await assert.rejects(l.take('a',agent),/已有操作者/);

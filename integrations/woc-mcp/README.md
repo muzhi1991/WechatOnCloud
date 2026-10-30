@@ -33,7 +33,10 @@ future managed instances; use a fixed list for restricted clients.
 
 `WOC_CONTROL_IDLE_MS` defaults to 120000 (range 1000–3600000). Only admitted GUI
 writes renew a managed client lock. Reading, repeated acquire, commands and agent
-calls do not. Human web control retains its existing heartbeat/priority behavior.
+calls do not. Human web ownership uses the authenticated user ID across tabs. Ordinary web
+requests need the current holder’s approval; only administrators may explicitly
+force takeover. Existing heartbeat timeouts remain unchanged. The generic request
+model is ready for agents, but agent request/approval MCP tools are not exposed yet.
 
 The same stable credential is used to register the gateway URL in original Cua
 and to authenticate WOC MCP. Never put a secret in a model prompt or command log.
